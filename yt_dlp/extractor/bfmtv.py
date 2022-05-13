@@ -1,7 +1,11 @@
 import re
 
 from .common import InfoExtractor
-from ..utils import extract_attributes
+from ..utils import (
+    extract_attributes,
+    determine_ext,
+    jwt_decode_hs256
+)
 
 
 class BFMTVBaseIE(InfoExtractor):
@@ -98,3 +102,74 @@ class BFMTVArticleIE(BFMTVBaseIE):
         return self.playlist_result(
             entries, bfmtv_id, self._og_search_title(webpage, fatal=False),
             self._html_search_meta(['og:description', 'description'], webpage))
+
+
+class BFMPlayVideoIE(InfoExtractor):
+    IE_NAME = 'rmc-bfmplay'
+    _VALID_URL = r'https?://(?:www\.)?rmcbfmplay\.com/.*\?contentId=(?P<id>.*)&.*'
+    _TESTS = []
+
+    def _get_token(self, video_id, client_id):
+        url = 'https://sso-client.rmcbfmplay.com/cas/oidc/authorize'
+
+        self._get_cookies('https://sso-client.rmcbfmplay.com')
+
+        response = self._download_webpage(
+            url, video_id, query={
+                'client_id': client_id,
+                'scope': 'openid',
+                'response_type': 'token',
+                'redirect_uri': 'https://www.rmcbfmplay.com',
+                'token': 'true',
+                'gateway': 'true'
+            })
+
+        return jwt_decode_hs256(response).get('tu')
+
+    def _extract_video(self, video_id):
+        # FIXME: Replace your CLIENT_ID
+        token = self._get_token(video_id, 'REPLACE_HERE_YOUR_CLIENT_ID')
+
+        response = self._download_json(
+            "https://ws-backendtv.rmcbfmplay.com/gaia-core/rest/api/web/v2/content/{}/options".format(video_id),
+            video_id=video_id, query={
+                'app': 'bfmrmc',
+                'device': 'browser',
+                'universe': 'PROVIDER',
+                'token': token
+            })[0]
+
+        title = response.get('title')
+
+        formats, subtitles = [], []
+        for offer in response.get('offers'):
+            streams = offer.get('streams')
+
+            for stream in streams:
+                video_url = stream.get('url')
+
+                ext = determine_ext(video_url)
+                if ext == "m3u8":
+                    fmts, subs = self._extract_m3u8_formats_and_subtitles(video_url, video_id, 'mp4', fatal=False)
+                    formats.extend(fmts)
+                    self._merge_subtitles(subs, target=subtitles)
+                elif ext == 'mpd':
+                    fmts, subs = self._extract_mpd_formats_and_subtitles(video_url, video_id, fatal=False)
+                    formats.extend(fmts)
+                    self._merge_subtitles(subs, target=subtitles)
+                elif ext == 'ism':
+                    fmts, subs = self._extract_ism_formats_and_subtitles(video_url, video_id, fatal=False)
+                    formats.extend(fmts)
+                    self._merge_subtitles(subs, target=subtitles)
+
+        return {
+            'id': video_id,
+            'title': title,
+            'formats': formats,
+            'subtitles': subtitles,
+        }
+
+    def _real_extract(self, url):
+        video_id = self._match_id(url)
+
+        return self._extract_video(video_id)

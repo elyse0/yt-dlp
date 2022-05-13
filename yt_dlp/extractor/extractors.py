@@ -152,6 +152,7 @@ from .bfmtv import (
     BFMTVIE,
     BFMTVLiveIE,
     BFMTVArticleIE,
+    BFMPlayVideoIE
 )
 from .bibeltv import BibelTVIE
 from .bigflix import BigflixIE
