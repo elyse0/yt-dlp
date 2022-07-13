@@ -4,6 +4,7 @@ from .common import InfoExtractor
 from ..utils import (
     int_or_none,
     parse_iso8601,
+    traverse_obj,
     try_get,
 )
 
@@ -79,4 +80,35 @@ class TF1IE(InfoExtractor):
             'series': decoration.get('programLabel'),
             'season_number': int_or_none(video.get('season')),
             'episode_number': int_or_none(video.get('episode')),
+        }
+
+
+class TF1DirectIE(InfoExtractor):
+    _VALID_URL = r'https?://(?:www\.)?tf1\.fr/(?P<id>[\w-]+)/direct'
+
+    _TESTS = [{
+        'url': 'https://www.tf1.fr/tf1/direct',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.tf1.fr/tf1-series-films/direct',
+        'only_matching': True,
+    }, {
+        'url': 'https://www.tf1.fr/tmc/direct',
+        'only_matching': True,
+    }]
+
+    def _real_extract(self, url):
+        display_id = self._match_id(url)
+
+        stream_response = self._download_json(f'https://mediainfo.tf1.fr/mediainfocombo/L_{display_id.upper()}?context=MYTF1', 'stream')
+        formats, subtitles = self._extract_mpd_formats_and_subtitles(stream_response['delivery']['url'], 'stream')
+
+        self._sort_formats(formats)
+        return {
+            'id': display_id,
+            'title': traverse_obj(stream_response, ('media', 'title')),
+            'formats': formats,
+            'subtitles': subtitles,
+            'is_live': True,
+            'thumbnail': traverse_obj(stream_response, ('media', 'preview')),
         }
