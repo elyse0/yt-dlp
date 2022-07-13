@@ -80,3 +80,21 @@ class TF1IE(InfoExtractor):
             'season_number': int_or_none(video.get('season')),
             'episode_number': int_or_none(video.get('episode')),
         }
+
+
+class TF1DirectIE(InfoExtractor):
+    _VALID_URL = r'https?://(?:www\.)?tf1\.fr/tf1/direct'
+    _TESTS = []
+
+    def _real_extract(self, url):
+        stream_response = self._download_json('https://mediainfo.tf1.fr/mediainfocombo/L_TF1?context=MYTF1', 'stream')
+
+        formats, subtitles = self._extract_mpd_formats_and_subtitles(stream_response['delivery']['url'], 'stream')
+
+        return {
+            'id': 'direct',
+            'title': 'Halp',
+            'formats': formats,
+            'subtitles': subtitles,
+            'is_live': True,
+        }
