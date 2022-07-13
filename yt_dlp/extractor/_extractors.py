@@ -1767,7 +1767,7 @@ from .tencent import (
 from .tennistv import TennisTVIE
 from .tenplay import TenPlayIE
 from .testurl import TestURLIE
-from .tf1 import TF1IE
+from .tf1 import TF1IE, TF1DirectIE
 from .tfo import TFOIE
 from .theholetv import TheHoleTvIE
 from .theintercept import TheInterceptIE
