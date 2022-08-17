@@ -3,30 +3,36 @@ import re
 import time
 
 from .common import InfoExtractor
+from .. import traverse_obj
 from ..aes import aes_cbc_encrypt_bytes
-from ..utils import determine_ext, int_or_none, traverse_obj, urljoin
+from ..utils import determine_ext, int_or_none, urljoin
+from ..jsinterp import JSInterpreter
 
 
-class WeTvBaseIE(InfoExtractor):
-    _VALID_URL_BASE = r'https?://(?:www\.)?wetv\.vip/(?:[^?#]+/)?play'
+class TencentBaseIE(InfoExtractor):
+    """
+        Subclasses must set _API_URL, _PLATFORM, _HOST, _REFERER
+    """
+
+    def _checksum_callback(self, payload):
+        return sum(map(ord, payload))
 
     def _get_ckey(self, video_id, url, app_version, platform):
         ua = self.get_param('http_headers')['User-Agent']
 
-        payload = (f'{video_id}|{int(time.time())}|mg3c3b04ba|{app_version}|0000000000000000|'
-                   f'{platform}|{url[:48]}|{ua.lower()[:48]}||Mozilla|Netscape|Win32|00|')
+        payload = (f'|{video_id}|{int(time.time())}|mg3c3b04ba|{app_version}|fae9b9c4fa22ce5f|'
+                   f'{platform}|{url[:48]}|{ua.lower()[:48]}||Mozilla|Netscape|Linux x86_64|00|')
 
         return aes_cbc_encrypt_bytes(
-            bytes(f'|{sum(map(ord, payload))}|{payload}', 'utf-8'),
+            bytes(f'|{self._checksum_callback(payload)}{payload}', 'utf-8'),
             b'Ok\xda\xa3\x9e/\x8c\xb0\x7f^r-\x9e\xde\xf3\x14',
             b'\x01PJ\xf3V\xe6\x19\xcf.B\xbb\xa6\x8c?p\xf9',
-            padding_mode='whitespace').hex()
+            padding_mode='whitespace').hex().upper()
 
     def _get_video_api_response(self, video_url, video_id, series_id, subtitle_format, video_format, video_quality):
         app_version = '3.5.57'
-        platform = '4830201'
 
-        ckey = self._get_ckey(video_id, video_url, app_version, platform)
+        ckey = self._get_ckey(video_id, video_url, app_version, self._PLATFORM)
         query = {
             'vid': video_id,
             'cid': series_id,
@@ -34,21 +40,109 @@ class WeTvBaseIE(InfoExtractor):
             'encryptVer': '8.1',
             'spcaptiontype': '1' if subtitle_format == 'vtt' else '0',  # 0 - SRT, 1 - VTT
             'sphls': '1' if video_format == 'hls' else '0',  # 0 - MP4, 1 - HLS
+            'dtype': '3' if video_format == 'hls' else '0',  # 0 - MP4, 3 - HLS
             'defn': video_quality,  # '': 480p, 'shd': 720p, 'fhd': 1080p
             'spsrt': '1',  # Enable subtitles
             'sphttps': '1',  # Enable HTTPS
             'otype': 'json',  # Response format: xml, json,
-            'dtype': '1',
             'spwm': '1',
-            'host': 'wetv.vip',  # These three values are needed for SHD
-            'referer': 'wetv.vip',
+            'host': self._HOST,  # These next three values are needed for SHD
+            'referer': self._REFERER,
             'ehost': video_url,
             'appVer': app_version,
-            'platform': platform,
+            'platform': self._PLATFORM,
         }
 
         return self._search_json(r'QZOutputJson=', self._download_webpage(
-            'https://play.wetv.vip/getvinfo', video_id, query=query), 'api_response', video_id)
+            self._API_URL, video_id, query=query), 'api_response', video_id)
+
+    def _extract_video_formats_and_subtitles(self, api_response, video_id):
+        video_response = api_response['vl']['vi'][0]
+        video_width = video_response.get('vw')
+        video_height = video_response.get('vh')
+
+        formats, subtitles = [], {}
+        for video_format in video_response['ul']['ui']:
+            if video_format.get('hls'):
+                fmts, subs = self._extract_m3u8_formats_and_subtitles(
+                    video_format['url'] + video_format['hls']['pt'], video_id, 'mp4', fatal=False)
+                for f in fmts:
+                    f['width'] = video_width
+                    f['height'] = video_height
+
+                formats.extend(fmts)
+                self._merge_subtitles(subs, target=subtitles)
+            else:
+                formats.append({
+                    'url': f'{video_format["url"]}{video_response["fn"]}?vkey={video_response["fvkey"]}',
+                    'width': video_width,
+                    'height': video_height,
+                    'ext': 'mp4',
+                })
+
+        return formats, subtitles
+
+    def _extract_video_native_subtitles(self, api_response, subtitles_format):
+        subtitles = {}
+        for subtitle in traverse_obj(api_response, ('sfl', 'fi')) or ():
+            subtitles.setdefault(subtitle['lang'].lower(), []).append({
+                'url': subtitle['url'],
+                'ext': subtitles_format,
+                'protocol': 'm3u8_native' if determine_ext(subtitle['url']) == 'm3u8' else 'http',
+            })
+
+        return subtitles
+
+    def _extract_all_video_formats_and_subtitles(self, url, video_id, series_id):
+        formats, subtitles = [], {}
+        for video_format, subtitle_format, video_quality in (
+        ('mp4', 'srt', ''), ('hls', 'vtt', 'shd'), ('hls', 'vtt', 'fhd')):
+            api_response = self._get_video_api_response(
+                url, video_id, series_id, subtitle_format, video_format, video_quality)
+
+            print(api_response)
+
+            fmts, subs = self._extract_video_formats_and_subtitles(api_response, video_id)
+            native_subtitles = self._extract_video_native_subtitles(api_response, subtitle_format)
+
+            formats.extend(fmts)
+            self._merge_subtitles(subs, native_subtitles, target=subtitles)
+
+        self._sort_formats(formats)
+        return formats, subtitles
+
+
+class QQIE(TencentBaseIE):
+    _VALID_URL = r'https?://(?:v\.)?qq\.com/x/page/(?P<id>\w+)'
+
+    _API_URL = 'https://h5vv6.video.qq.com/getvinfo'
+    _PLATFORM = '10901'
+    _HOST = 'v.qq.com'
+    _REFERER = 'v.qq.com'
+
+    def _checksum_callback(self, payload):
+        jsi = JSInterpreter('function x(b){a=0;for(n=0;n<b.length;n++)a=(a<<5)-a+b.charCodeAt(n),a=a&a;return a}')
+        return jsi.call_function('x', payload)
+
+    def _real_extract(self, url):
+        video_id = self._match_id(url)
+
+        formats, subtitles = self._extract_all_video_formats_and_subtitles(url, video_id, '')
+        return {
+            'id': video_id,
+            'title': '',
+            'formats': formats,
+            'subtitles': subtitles,
+        }
+
+
+class WeTvBaseIE(TencentBaseIE):
+    _VALID_URL_BASE = r'https?://(?:www\.)?wetv\.vip/(?:[^?#]+/)?play'
+
+    _API_URL = 'https://play.wetv.vip/getvinfo'
+    _PLATFORM = '4830201'
+    _HOST = 'wetv.vip'
+    _REFERER = 'wetv.vip'
 
     def _get_webpage_metadata(self, webpage, video_id):
         return self._parse_json(
@@ -62,7 +156,7 @@ class WeTvEpisodeIE(WeTvBaseIE):
 
     _TESTS = [{
         'url': 'https://wetv.vip/en/play/air11ooo2rdsdi3-Cute-Programmer/v0040pr89t9-EP1-Cute-Programmer',
-        'md5': 'a046f565c9dce9b263a0465a422cd7bf',
+        'md5': '0c70fdfaa5011ab022eebc598e64bbbe',
         'info_dict': {
             'id': 'v0040pr89t9',
             'ext': 'mp4',
@@ -76,7 +170,7 @@ class WeTvEpisodeIE(WeTvBaseIE):
         },
     }, {
         'url': 'https://wetv.vip/en/play/u37kgfnfzs73kiu/p0039b9nvik',
-        'md5': '4d9d69bcfd11da61f4aae64fc6b316b3',
+        'md5': '3b3c15ca4b9a158d8d28d5aa9d7c0a49',
         'info_dict': {
             'id': 'p0039b9nvik',
             'ext': 'mp4',
@@ -104,66 +198,19 @@ class WeTvEpisodeIE(WeTvBaseIE):
         },
     }]
 
-    def _extract_video_formats_and_subtitles(self, api_response, video_id, video_quality):
-        video_response = api_response['vl']['vi'][0]
-        video_width = video_response.get('vw')
-        video_height = video_response.get('vh')
-
-        formats, subtitles = [], {}
-        for video_format in video_response['ul']['ui']:
-            if video_format.get('hls'):
-                fmts, subs = self._extract_m3u8_formats_and_subtitles(
-                    video_format['url'] + video_format['hls']['pname'], video_id, 'mp4', fatal=False)
-                for f in fmts:
-                    f['width'] = video_width
-                    f['height'] = video_height
-
-                formats.extend(fmts)
-                self._merge_subtitles(subs, target=subtitles)
-            else:
-                formats.append({
-                    'url': f'{video_format["url"]}{video_response["fn"]}?vkey={video_response["fvkey"]}',
-                    'width': video_width,
-                    'height': video_height,
-                    'ext': 'mp4',
-                })
-
-        return formats, subtitles
-
-    def _extract_video_subtitles(self, api_response, subtitles_format):
-        subtitles = {}
-        for subtitle in traverse_obj(api_response, ('sfl', 'fi')):
-            subtitles.setdefault(subtitle['lang'].lower(), []).append({
-                'url': subtitle['url'],
-                'ext': subtitles_format,
-                'protocol': 'm3u8_native' if determine_ext(subtitle['url']) == 'm3u8' else 'http',
-            })
-
-        return subtitles
-
     def _real_extract(self, url):
         video_id, series_id = self._match_valid_url(url).group('id', 'series_id')
         webpage = self._download_webpage(url, video_id)
 
-        formats, subtitles = [], {}
-        for video_format, subtitle_format, video_quality in (('mp4', 'srt', ''), ('hls', 'vtt', 'shd'), ('hls', 'vtt', 'fhd')):
-            api_response = self._get_video_api_response(url, video_id, series_id, subtitle_format, video_format, video_quality)
-
-            fmts, subs = self._extract_video_formats_and_subtitles(api_response, video_id, video_quality)
-            native_subtitles = self._extract_video_subtitles(api_response, subtitle_format)
-
-            formats.extend(fmts)
-            self._merge_subtitles(subs, native_subtitles, target=subtitles)
-
-        self._sort_formats(formats)
+        formats, subtitles = self._extract_all_video_formats_and_subtitles(url, video_id, series_id)
         webpage_metadata = self._get_webpage_metadata(webpage, video_id)
 
         return {
             'id': video_id,
-            'title': (self._og_search_title(webpage)
-                      or traverse_obj(webpage_metadata, ('coverInfo', 'description'))),
-            'description': (self._og_search_description(webpage)
-                            or traverse_obj(webpage_metadata, ('coverInfo', 'description'))),
+            'title': (self._og_search_title(webpage) or
+                      traverse_obj(webpage_metadata, ('coverInfo', 'title'))).replace('_Watch online', ''),
+            'description': (
+                traverse_obj(webpage_metadata, ('coverInfo', 'description') or self._og_search_description(webpage))),
             'formats': formats,
             'subtitles': subtitles,
             'thumbnail': self._og_search_thumbnail(webpage),
@@ -205,4 +252,5 @@ class WeTvSeriesIE(WeTvBaseIE):
         return self.playlist_from_matches(
             episode_paths, series_id, ie=WeTvEpisodeIE, getter=functools.partial(urljoin, url),
             title=traverse_obj(webpage_metadata, ('coverInfo', 'title')) or self._og_search_title(webpage),
-            description=traverse_obj(webpage_metadata, ('coverInfo', 'description')) or self._og_search_description(webpage))
+            description=traverse_obj(webpage_metadata, ('coverInfo', 'description')) or self._og_search_description(
+                webpage))
