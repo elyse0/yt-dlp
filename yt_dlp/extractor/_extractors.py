@@ -1344,7 +1344,7 @@ from .playsuisse import PlaySuisseIE
 from .playtvak import PlaytvakIE
 from .playvid import PlayvidIE
 from .playwire import PlaywireIE
-from .plutotv import PlutoTVIE
+from .plutotv import PlutoTVIE, PlutoTVLiveIE
 from .pluralsight import (
     PluralsightIE,
     PluralsightCourseIE,

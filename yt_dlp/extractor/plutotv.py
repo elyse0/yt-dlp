@@ -182,3 +182,56 @@ class PlutoTVIE(InfoExtractor):
                                         playlist_id=video_json.get('_id', info_slug),
                                         playlist_title=playlist_title)
         return self._get_video_info(video_json, info_slug)
+
+
+class PlutoTVLiveIE(InfoExtractor):
+    _VALID_URL = r'https?://(?:www\.)?pluto\.tv/\w+/live-tv/(?P<id>[\w-]+)'
+
+    _TESTS = [{
+        'url': 'https://pluto.tv/it/live-tv/pluto-tv-film-it',
+        'only_matching': True,
+    }, {
+        'url': 'https://pluto.tv/en/live-tv/pluto-tv-cine-estelar-1',
+        'only_matching': True,
+    }]
+
+    def _real_extract(self, url):
+        channel_slug = self._match_id(url)
+        webpage = self._download_webpage(url, channel_slug)
+
+        app_version = self._search_regex(
+            r'<meta[^>]+name\s*=\s*"appVersion"[^>]+content="([^"]+)', webpage, 'app_version',
+            fatal=False) or '6.5.1-91b75191d0d2a319cfd4c24bd797a393ac0aac2b'
+
+        api_response = self._download_json(
+            'https://boot.pluto.tv/v4/start', channel_slug, query={
+                'appVersion': app_version,
+                'clientID': uuid.uuid1(),
+                'channelSlug': channel_slug,
+                'appName': 'web',
+                'deviceVersion': '104.0.5112',
+                'clientModelNumber': '1.0.0',
+            })
+
+        channel_info = api_response["EPG"][0]
+        formats, subtitles = self._extract_m3u8_formats_and_subtitles(
+            f'{api_response["servers"]["stitcher"]}{channel_info["stitched"]["path"]}', channel_slug, query={
+                'appVersion': app_version,
+                'sid': uuid.uuid1(),
+                'deviceId': uuid.uuid1(),
+                'deviceModel': 'web',
+                'deviceDNT': 'false',
+                'deviceType': 'web',
+                'deviceMake': 'chrome',
+                'deviceVersion': '104.0.5112',
+                'jwt': api_response['sessionToken'],
+            })
+
+        self._sort_formats(formats)
+        return {
+            'id': channel_slug,
+            'title': channel_info.get('name'),
+            'formats': formats,
+            'subtitles': subtitles,
+            'is_live': True,
+        }
