@@ -26,7 +26,7 @@ from .dash import DashSegmentsFD
 from .external import FFmpegFD, get_external_downloader
 from .f4m import F4mFD
 from .fc2 import FC2LiveFD
-from .hls import HlsFD
+from .hls import HlsFD, HlsLiveFD
 from .http import HttpFD
 from .ism import IsmFD
 from .mhtml import MhtmlFD
@@ -40,7 +40,7 @@ PROTOCOL_MAP = {
     'rtmp': RtmpFD,
     'rtmpe': RtmpFD,
     'rtmp_ffmpeg': FFmpegFD,
-    'm3u8_native': HlsFD,
+    'm3u8_native': HlsLiveFD,
     'm3u8': FFmpegFD,
     'mms': RtspFD,
     'rtsp': RtspFD,
@@ -109,14 +109,14 @@ def _get_suitable_downloader(info_dict, protocol, params, default):
 
     if protocol in ('m3u8', 'm3u8_native'):
         if info_dict.get('is_live'):
-            return FFmpegFD
+            return HlsLiveFD
         elif (external_downloader or '').lower() == 'native':
-            return HlsFD
+            return HlsLiveFD
         elif protocol == 'm3u8_native' and get_suitable_downloader(
                 info_dict, params, None, protocol='m3u8_frag_urls', to_stdout=info_dict['to_stdout']):
-            return HlsFD
+            return HlsLiveFD
         elif params.get('hls_prefer_native') is True:
-            return HlsFD
+            return HlsLiveFD
         elif params.get('hls_prefer_native') is False:
             return FFmpegFD
 

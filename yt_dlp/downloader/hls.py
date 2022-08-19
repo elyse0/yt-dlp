@@ -1,6 +1,7 @@
 import binascii
 import io
 import re
+import time
 import urllib.parse
 
 from . import get_suitable_downloader
@@ -8,10 +9,261 @@ from .external import FFmpegFD
 from .fragment import FragmentFD
 from .. import webvtt
 from ..dependencies import Cryptodome_AES
-from ..utils import bug_reports_message, parse_m3u8_attributes, update_url_query
+from ..utils import bug_reports_message, parse_m3u8_attributes, update_url_query, int_or_none
 
 
-class HlsFD(FragmentFD):
+class HlsBaseFD(FragmentFD):
+
+    @staticmethod
+    def is_ad_fragment_start(manifest_line):
+        return (manifest_line.startswith('#ANVATO-SEGMENT-INFO') and 'type=ad' in manifest_line
+                or manifest_line.startswith('#UPLYNK-SEGMENT') and manifest_line.endswith(',ad'))
+
+    @staticmethod
+    def is_ad_fragment_end(manifest_line):
+        return (manifest_line.startswith('#ANVATO-SEGMENT-INFO') and 'type=master' in manifest_line
+                or manifest_line.startswith('#UPLYNK-SEGMENT') and manifest_line.endswith(',segment'))
+
+    @staticmethod
+    def _is_target_duration(manifest_line):
+        return manifest_line.startswith('#EXT-X-TARGETDURATION')
+
+    def _get_manifest_stats(self, manifest):
+        media_frags = 0
+        ad_frags = 0
+        ad_frag_next = False
+        target_duration = 0
+        for line in manifest.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('#'):
+                if self._is_target_duration(line):
+                    target_duration = int_or_none(re.search(r'(\d+)', line).group(1))
+
+                if self.is_ad_fragment_start(line):
+                    ad_frag_next = True
+                elif self.is_ad_fragment_end(line):
+                    ad_frag_next = False
+                continue
+            if ad_frag_next:
+                ad_frags += 1
+                continue
+            media_frags += 1
+
+        return {
+            'total_frags': media_frags,
+            'ad_frags': ad_frags,
+            'target_duration': target_duration,
+        }
+
+    def _get_fragments(self, ctx, info_dict, manifest, manifest_url):
+        fragments = []
+
+        format_index = info_dict.get('format_index')
+        extra_query = None
+        extra_param_to_segment_url = info_dict.get('extra_param_to_segment_url')
+        if extra_param_to_segment_url:
+            extra_query = urllib.parse.parse_qs(extra_param_to_segment_url)
+
+        i = 0
+        media_sequence = 0
+        decrypt_info = {'METHOD': 'NONE'}
+        byte_range = {}
+        discontinuity_count = 0
+        frag_index = 0
+        ad_frag_next = False
+        for line in manifest.splitlines():
+            line = line.strip()
+            if line:
+                if not line.startswith('#'):
+                    if format_index and discontinuity_count != format_index:
+                        continue
+                    if ad_frag_next:
+                        continue
+                    frag_index += 1
+                    # if frag_index <= ctx['fragment_index']:
+                    #    continue
+                    frag_url = (
+                        line
+                        if re.match(r'^https?://', line)
+                        else urllib.parse.urljoin(manifest_url, line))
+                    if extra_query:
+                        frag_url = update_url_query(frag_url, extra_query)
+
+                    fragments.append({
+                        'frag_index': frag_index,
+                        'url': frag_url,
+                        'decrypt_info': decrypt_info,
+                        'byte_range': byte_range,
+                        'media_sequence': media_sequence,
+                    })
+                    media_sequence += 1
+
+                elif line.startswith('#EXT-X-MAP'):
+                    if format_index and discontinuity_count != format_index:
+                        continue
+                    if frag_index > 0:
+                        self.report_error(
+                            'Initialization fragment found after media fragments, unable to download')
+                        return False
+                    frag_index += 1
+                    map_info = parse_m3u8_attributes(line[11:])
+                    frag_url = (
+                        map_info.get('URI')
+                        if re.match(r'^https?://', map_info.get('URI'))
+                        else urllib.parse.urljoin(manifest_url, map_info.get('URI')))
+                    if extra_query:
+                        frag_url = update_url_query(frag_url, extra_query)
+
+                    if map_info.get('BYTERANGE'):
+                        splitted_byte_range = map_info.get('BYTERANGE').split('@')
+                        sub_range_start = int(splitted_byte_range[1]) if len(splitted_byte_range) == 2 else byte_range[
+                            'end']
+                        byte_range = {
+                            'start': sub_range_start,
+                            'end': sub_range_start + int(splitted_byte_range[0]),
+                        }
+
+                    fragments.append({
+                        'frag_index': frag_index,
+                        'url': frag_url,
+                        'decrypt_info': decrypt_info,
+                        'byte_range': byte_range,
+                        'media_sequence': media_sequence
+                    })
+                    media_sequence += 1
+
+                elif line.startswith('#EXT-X-KEY'):
+                    decrypt_url = decrypt_info.get('URI')
+                    decrypt_info = parse_m3u8_attributes(line[11:])
+                    if decrypt_info['METHOD'] == 'AES-128':
+                        if 'IV' in decrypt_info:
+                            decrypt_info['IV'] = binascii.unhexlify(decrypt_info['IV'][2:].zfill(32))
+                        if not re.match(r'^https?://', decrypt_info['URI']):
+                            decrypt_info['URI'] = urllib.parse.urljoin(
+                                manifest_url, decrypt_info['URI'])
+                        if extra_query:
+                            decrypt_info['URI'] = update_url_query(decrypt_info['URI'], extra_query)
+                        if decrypt_url != decrypt_info['URI']:
+                            decrypt_info['KEY'] = None
+
+                elif line.startswith('#EXT-X-MEDIA-SEQUENCE'):
+                    media_sequence = int(line[22:])
+                elif line.startswith('#EXT-X-BYTERANGE'):
+                    splitted_byte_range = line[17:].split('@')
+                    sub_range_start = int(splitted_byte_range[1]) if len(splitted_byte_range) == 2 else byte_range[
+                        'end']
+                    byte_range = {
+                        'start': sub_range_start,
+                        'end': sub_range_start + int(splitted_byte_range[0]),
+                    }
+                elif self.is_ad_fragment_start(line):
+                    ad_frag_next = True
+                elif self.is_ad_fragment_end(line):
+                    ad_frag_next = False
+                elif line.startswith('#EXT-X-DISCONTINUITY'):
+                    discontinuity_count += 1
+                i += 1
+
+        return fragments
+
+    def _download_webvtt_fragments(self, ctx, fragments, info_dict, extra_state):
+        def pack_fragment(frag_content, frag_index):
+            output = io.StringIO()
+            adjust = 0
+            overflow = False
+            mpegts_last = None
+            for block in webvtt.parse_fragment(frag_content):
+                if isinstance(block, webvtt.CueBlock):
+                    extra_state['webvtt_mpegts_last'] = mpegts_last
+                    if overflow:
+                        extra_state['webvtt_mpegts_adjust'] += 1
+                        overflow = False
+                    block.start += adjust
+                    block.end += adjust
+
+                    dedup_window = extra_state.setdefault('webvtt_dedup_window', [])
+
+                    ready = []
+
+                    i = 0
+                    is_new = True
+                    while i < len(dedup_window):
+                        wcue = dedup_window[i]
+                        wblock = webvtt.CueBlock.from_json(wcue)
+                        i += 1
+                        if wblock.hinges(block):
+                            wcue['end'] = block.end
+                            is_new = False
+                            continue
+                        if wblock == block:
+                            is_new = False
+                            continue
+                        if wblock.end > block.start:
+                            continue
+                        ready.append(wblock)
+                        i -= 1
+                        del dedup_window[i]
+
+                    if is_new:
+                        dedup_window.append(block.as_json)
+                    for block in ready:
+                        block.write_into(output)
+
+                    # we only emit cues once they fall out of the duplicate window
+                    continue
+                elif isinstance(block, webvtt.Magic):
+                    # take care of MPEG PES timestamp overflow
+                    if block.mpegts is None:
+                        block.mpegts = 0
+                    extra_state.setdefault('webvtt_mpegts_adjust', 0)
+                    block.mpegts += extra_state['webvtt_mpegts_adjust'] << 33
+                    if block.mpegts < extra_state.get('webvtt_mpegts_last', 0):
+                        overflow = True
+                        block.mpegts += 1 << 33
+                    mpegts_last = block.mpegts
+
+                    if frag_index == 1:
+                        extra_state['webvtt_mpegts'] = block.mpegts or 0
+                        extra_state['webvtt_local'] = block.local or 0
+                        # XXX: block.local = block.mpegts = None ?
+                    else:
+                        if block.mpegts is not None and block.local is not None:
+                            adjust = (
+                                (block.mpegts - extra_state.get('webvtt_mpegts', 0))
+                                - (block.local - extra_state.get('webvtt_local', 0))
+                            )
+                        continue
+                elif isinstance(block, webvtt.HeaderBlock):
+                    if frag_index != 1:
+                        # XXX: this should probably be silent as well
+                        # or verify that all segments contain the same data
+                        self.report_warning(bug_reports_message(
+                            'Discarding a %s block found in the middle of the stream; '
+                            'if the subtitles display incorrectly,'
+                            % (type(block).__name__)))
+                        continue
+                block.write_into(output)
+
+            return output.getvalue().encode()
+
+        def fin_fragments():
+            dedup_window = extra_state.get('webvtt_dedup_window')
+            if not dedup_window:
+                return b''
+
+            output = io.StringIO()
+            for cue in dedup_window:
+                webvtt.CueBlock.from_json(cue).write_into(output)
+
+            return output.getvalue().encode()
+
+        self.download_and_append_fragments(
+            ctx, fragments, info_dict, pack_func=pack_fragment, finish_func=fin_fragments)
+
+
+class HlsFD(HlsBaseFD):
     """
     Download segments in a m3u8 manifest. External downloaders can take over
     the fragment downloads by supporting the 'm3u8_frag_urls' protocol and
@@ -50,26 +302,29 @@ class HlsFD(FragmentFD):
             yield not info_dict.get('is_live')
             for feature in UNSUPPORTED_FEATURES:
                 yield not re.search(feature, manifest)
+
         return all(check_results())
 
     def real_download(self, filename, info_dict):
-        man_url = info_dict['url']
+        manifest_url = info_dict['url']
         self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
 
-        urlh = self.ydl.urlopen(self._prepare_url(info_dict, man_url))
-        man_url = urlh.geturl()
-        s = urlh.read().decode('utf-8', 'ignore')
+        urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
+        manifest_url = urlh.geturl()
+        manifest = urlh.read().decode('utf-8', 'ignore')
 
-        can_download, message = self.can_download(s, info_dict, self.params.get('allow_unplayable_formats')), None
+        can_download, message = self.can_download(manifest, info_dict,
+                                                  self.params.get('allow_unplayable_formats')), None
         if can_download:
             has_ffmpeg = FFmpegFD.available()
-            no_crypto = not Cryptodome_AES and '#EXT-X-KEY:METHOD=AES-128' in s
+            no_crypto = not Cryptodome_AES and '#EXT-X-KEY:METHOD=AES-128' in manifest
             if no_crypto and has_ffmpeg:
                 can_download, message = False, 'The stream has AES-128 encryption and pycryptodomex is not available'
             elif no_crypto:
                 message = ('The stream has AES-128 encryption and neither ffmpeg nor pycryptodomex are available; '
                            'Decryption will be performed natively, but will be extremely slow')
-            elif info_dict.get('extractor_key') == 'Generic' and re.search(r'(?m)#EXT-X-MEDIA-SEQUENCE:(?!0$)', s):
+            elif info_dict.get('extractor_key') == 'Generic' and re.search(r'(?m)#EXT-X-MEDIA-SEQUENCE:(?!0$)',
+                                                                           manifest):
                 install_ffmpeg = '' if has_ffmpeg else 'install ffmpeg and '
                 message = ('Live HLS streams are not supported by the native downloader. If this is a livestream, '
                            f'please {install_ffmpeg}add "--downloader ffmpeg --hls-use-mpegts" to your command')
@@ -77,7 +332,7 @@ class HlsFD(FragmentFD):
             has_drm = re.search('|'.join([
                 r'#EXT-X-FAXS-CM:',  # Adobe Flash Access
                 r'#EXT-X-(?:SESSION-)?KEY:.*?URI="skd://',  # Apple FairPlay
-            ]), s)
+            ]), manifest)
             if has_drm and not self.params.get('allow_unplayable_formats'):
                 self.report_error(
                     'This video is DRM protected; Try selecting another format with --format or '
@@ -96,154 +351,26 @@ class HlsFD(FragmentFD):
         else:
             real_downloader = get_suitable_downloader(
                 info_dict, self.params, None, protocol='m3u8_frag_urls', to_stdout=(filename == '-'))
-        if real_downloader and not real_downloader.supports_manifest(s):
+        if real_downloader and not real_downloader.supports_manifest(manifest):
             real_downloader = None
         if real_downloader:
             self.to_screen(f'[{self.FD_NAME}] Fragment downloads will be delegated to {real_downloader.get_basename()}')
 
-        def is_ad_fragment_start(s):
-            return (s.startswith('#ANVATO-SEGMENT-INFO') and 'type=ad' in s
-                    or s.startswith('#UPLYNK-SEGMENT') and s.endswith(',ad'))
-
-        def is_ad_fragment_end(s):
-            return (s.startswith('#ANVATO-SEGMENT-INFO') and 'type=master' in s
-                    or s.startswith('#UPLYNK-SEGMENT') and s.endswith(',segment'))
-
-        fragments = []
-
-        media_frags = 0
-        ad_frags = 0
-        ad_frag_next = False
-        for line in s.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith('#'):
-                if is_ad_fragment_start(line):
-                    ad_frag_next = True
-                elif is_ad_fragment_end(line):
-                    ad_frag_next = False
-                continue
-            if ad_frag_next:
-                ad_frags += 1
-                continue
-            media_frags += 1
-
+        manifest_stats = self._get_manifest_stats(manifest)
         ctx = {
             'filename': filename,
-            'total_frags': media_frags,
-            'ad_frags': ad_frags,
+            'total_frags': manifest_stats['total_frags'],
+            'ad_frags': manifest_stats['ad_frags'],
         }
+
+        ctx.setdefault('extra_state', {})
 
         if real_downloader:
             self._prepare_external_frag_download(ctx)
         else:
             self._prepare_and_start_frag_download(ctx, info_dict)
 
-        extra_state = ctx.setdefault('extra_state', {})
-
-        format_index = info_dict.get('format_index')
-        extra_query = None
-        extra_param_to_segment_url = info_dict.get('extra_param_to_segment_url')
-        if extra_param_to_segment_url:
-            extra_query = urllib.parse.parse_qs(extra_param_to_segment_url)
-        i = 0
-        media_sequence = 0
-        decrypt_info = {'METHOD': 'NONE'}
-        byte_range = {}
-        discontinuity_count = 0
-        frag_index = 0
-        ad_frag_next = False
-        for line in s.splitlines():
-            line = line.strip()
-            if line:
-                if not line.startswith('#'):
-                    if format_index and discontinuity_count != format_index:
-                        continue
-                    if ad_frag_next:
-                        continue
-                    frag_index += 1
-                    if frag_index <= ctx['fragment_index']:
-                        continue
-                    frag_url = (
-                        line
-                        if re.match(r'^https?://', line)
-                        else urllib.parse.urljoin(man_url, line))
-                    if extra_query:
-                        frag_url = update_url_query(frag_url, extra_query)
-
-                    fragments.append({
-                        'frag_index': frag_index,
-                        'url': frag_url,
-                        'decrypt_info': decrypt_info,
-                        'byte_range': byte_range,
-                        'media_sequence': media_sequence,
-                    })
-                    media_sequence += 1
-
-                elif line.startswith('#EXT-X-MAP'):
-                    if format_index and discontinuity_count != format_index:
-                        continue
-                    if frag_index > 0:
-                        self.report_error(
-                            'Initialization fragment found after media fragments, unable to download')
-                        return False
-                    frag_index += 1
-                    map_info = parse_m3u8_attributes(line[11:])
-                    frag_url = (
-                        map_info.get('URI')
-                        if re.match(r'^https?://', map_info.get('URI'))
-                        else urllib.parse.urljoin(man_url, map_info.get('URI')))
-                    if extra_query:
-                        frag_url = update_url_query(frag_url, extra_query)
-
-                    if map_info.get('BYTERANGE'):
-                        splitted_byte_range = map_info.get('BYTERANGE').split('@')
-                        sub_range_start = int(splitted_byte_range[1]) if len(splitted_byte_range) == 2 else byte_range['end']
-                        byte_range = {
-                            'start': sub_range_start,
-                            'end': sub_range_start + int(splitted_byte_range[0]),
-                        }
-
-                    fragments.append({
-                        'frag_index': frag_index,
-                        'url': frag_url,
-                        'decrypt_info': decrypt_info,
-                        'byte_range': byte_range,
-                        'media_sequence': media_sequence
-                    })
-                    media_sequence += 1
-
-                elif line.startswith('#EXT-X-KEY'):
-                    decrypt_url = decrypt_info.get('URI')
-                    decrypt_info = parse_m3u8_attributes(line[11:])
-                    if decrypt_info['METHOD'] == 'AES-128':
-                        if 'IV' in decrypt_info:
-                            decrypt_info['IV'] = binascii.unhexlify(decrypt_info['IV'][2:].zfill(32))
-                        if not re.match(r'^https?://', decrypt_info['URI']):
-                            decrypt_info['URI'] = urllib.parse.urljoin(
-                                man_url, decrypt_info['URI'])
-                        if extra_query:
-                            decrypt_info['URI'] = update_url_query(decrypt_info['URI'], extra_query)
-                        if decrypt_url != decrypt_info['URI']:
-                            decrypt_info['KEY'] = None
-
-                elif line.startswith('#EXT-X-MEDIA-SEQUENCE'):
-                    media_sequence = int(line[22:])
-                elif line.startswith('#EXT-X-BYTERANGE'):
-                    splitted_byte_range = line[17:].split('@')
-                    sub_range_start = int(splitted_byte_range[1]) if len(splitted_byte_range) == 2 else byte_range['end']
-                    byte_range = {
-                        'start': sub_range_start,
-                        'end': sub_range_start + int(splitted_byte_range[0]),
-                    }
-                elif is_ad_fragment_start(line):
-                    ad_frag_next = True
-                elif is_ad_fragment_end(line):
-                    ad_frag_next = False
-                elif line.startswith('#EXT-X-DISCONTINUITY'):
-                    discontinuity_count += 1
-                i += 1
+        fragments = self._get_fragments(ctx, info_dict, manifest, manifest_url)
 
         # We only download the first fragment during the test
         if self.params.get('test', False):
@@ -258,97 +385,86 @@ class HlsFD(FragmentFD):
             return fd.real_download(filename, info_dict)
 
         if is_webvtt:
-            def pack_fragment(frag_content, frag_index):
-                output = io.StringIO()
-                adjust = 0
-                overflow = False
-                mpegts_last = None
-                for block in webvtt.parse_fragment(frag_content):
-                    if isinstance(block, webvtt.CueBlock):
-                        extra_state['webvtt_mpegts_last'] = mpegts_last
-                        if overflow:
-                            extra_state['webvtt_mpegts_adjust'] += 1
-                            overflow = False
-                        block.start += adjust
-                        block.end += adjust
-
-                        dedup_window = extra_state.setdefault('webvtt_dedup_window', [])
-
-                        ready = []
-
-                        i = 0
-                        is_new = True
-                        while i < len(dedup_window):
-                            wcue = dedup_window[i]
-                            wblock = webvtt.CueBlock.from_json(wcue)
-                            i += 1
-                            if wblock.hinges(block):
-                                wcue['end'] = block.end
-                                is_new = False
-                                continue
-                            if wblock == block:
-                                is_new = False
-                                continue
-                            if wblock.end > block.start:
-                                continue
-                            ready.append(wblock)
-                            i -= 1
-                            del dedup_window[i]
-
-                        if is_new:
-                            dedup_window.append(block.as_json)
-                        for block in ready:
-                            block.write_into(output)
-
-                        # we only emit cues once they fall out of the duplicate window
-                        continue
-                    elif isinstance(block, webvtt.Magic):
-                        # take care of MPEG PES timestamp overflow
-                        if block.mpegts is None:
-                            block.mpegts = 0
-                        extra_state.setdefault('webvtt_mpegts_adjust', 0)
-                        block.mpegts += extra_state['webvtt_mpegts_adjust'] << 33
-                        if block.mpegts < extra_state.get('webvtt_mpegts_last', 0):
-                            overflow = True
-                            block.mpegts += 1 << 33
-                        mpegts_last = block.mpegts
-
-                        if frag_index == 1:
-                            extra_state['webvtt_mpegts'] = block.mpegts or 0
-                            extra_state['webvtt_local'] = block.local or 0
-                            # XXX: block.local = block.mpegts = None ?
-                        else:
-                            if block.mpegts is not None and block.local is not None:
-                                adjust = (
-                                    (block.mpegts - extra_state.get('webvtt_mpegts', 0))
-                                    - (block.local - extra_state.get('webvtt_local', 0))
-                                )
-                            continue
-                    elif isinstance(block, webvtt.HeaderBlock):
-                        if frag_index != 1:
-                            # XXX: this should probably be silent as well
-                            # or verify that all segments contain the same data
-                            self.report_warning(bug_reports_message(
-                                'Discarding a %s block found in the middle of the stream; '
-                                'if the subtitles display incorrectly,'
-                                % (type(block).__name__)))
-                            continue
-                    block.write_into(output)
-
-                return output.getvalue().encode()
-
-            def fin_fragments():
-                dedup_window = extra_state.get('webvtt_dedup_window')
-                if not dedup_window:
-                    return b''
-
-                output = io.StringIO()
-                for cue in dedup_window:
-                    webvtt.CueBlock.from_json(cue).write_into(output)
-
-                return output.getvalue().encode()
-
-            self.download_and_append_fragments(
-                ctx, fragments, info_dict, pack_func=pack_fragment, finish_func=fin_fragments)
+            return self._download_webvtt_fragments()
         else:
             return self.download_and_append_fragments(ctx, fragments, info_dict)
+
+
+class HlsLiveFD(HlsBaseFD):
+    FD_NAME = 'hls-live-native'
+
+    @staticmethod
+    def _update_media_playlist(media_playlist, new_fragments):
+        media_playlist_sequences = media_playlist.keys()
+        new_fragments_media_sequences = [fragment['media_sequence'] for fragment in new_fragments]
+
+        new_media_playlist_sequences = list(set(new_fragments_media_sequences) - set(media_playlist_sequences))
+        print(new_media_playlist_sequences)
+
+        for media_sequence in new_media_playlist_sequences:
+            media_playlist[media_sequence] = next(
+                (item for item in new_fragments if item["media_sequence"] == media_sequence), None)
+
+        return media_playlist
+
+    def real_download(self, filename, info_dict):
+        media_playlist = {}
+        current_media_sequence = None
+        fragments_to_download = None
+
+        while True:
+            print('HlsLiveFD')
+            manifest_url = info_dict['url']
+            self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
+
+            urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
+            manifest_url = urlh.geturl()
+            manifest = urlh.read().decode('utf-8', 'ignore')
+
+            manifest_stats = self._get_manifest_stats(manifest)
+            ctx = {
+                'filename': filename,
+                'total_frags': manifest_stats['total_frags'],
+                'ad_frags': manifest_stats['ad_frags'],
+            }
+
+            ctx.setdefault('extra_state', {})
+
+            fragments = self._get_fragments(ctx, info_dict, manifest, manifest_url)
+
+            media_playlist = self._update_media_playlist(media_playlist, fragments)
+
+            if current_media_sequence is None:
+                current_media_sequence = min(media_playlist.keys())
+
+            max_media_playlist_sequence = max(media_playlist.keys())
+
+            print(current_media_sequence == max_media_playlist_sequence)
+
+            if current_media_sequence == max_media_playlist_sequence:
+                fragments_to_download = None
+            else:
+                fragments_to_download = {
+                    'start': current_media_sequence,
+                    'end': max_media_playlist_sequence
+                }
+
+                current_media_sequence = max_media_playlist_sequence
+
+            print(fragments_to_download)
+            print(f'Sleeping for: {manifest_stats["target_duration"]}')
+            if fragments_to_download:
+                for media_sequence in [x for x in
+                                       range(fragments_to_download['start'] + 1, fragments_to_download['end'] + 1)]:
+
+                    self._prepare_frag_download(ctx)
+                    print(media_playlist[media_sequence])
+                    ctx['fragment_index'] = media_sequence
+
+                    decrypt_fragment = self.decrypter(info_dict)
+                    self._download_fragment(ctx, media_playlist[media_sequence]['url'], info_dict)
+                    self._append_fragment(ctx, decrypt_fragment(media_playlist[media_sequence], self._read_fragment(ctx)))
+
+            time.sleep(manifest_stats['target_duration'])
+
+        raise Exception
