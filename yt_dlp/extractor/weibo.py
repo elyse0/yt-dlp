@@ -11,20 +11,31 @@ from ..compat import (
 from ..utils import (
     js_to_json,
     strip_jsonp,
+    traverse_obj,
     urlencode_postdata,
 )
 
 
 class WeiboIE(InfoExtractor):
-    _VALID_URL = r'https?://(?:www\.)?weibo\.com/[0-9]+/(?P<id>[a-zA-Z0-9]+)'
-    _TEST = {
+    _VALID_URL = r'https?://(?:www\.)?weibo\.com/(?:[^?#]+/)?[0-9]+[/|:](?P<id>[a-zA-Z0-9]+)'
+    _TESTS = [{
         'url': 'https://weibo.com/6275294458/Fp6RGfbff?type=comment',
         'info_dict': {
             'id': 'Fp6RGfbff',
             'ext': 'mp4',
             'title': 'You should have servants to massage you,... 来自Hosico_猫 - 微博',
-        }
-    }
+        },
+    }, {
+        'url': 'https://weibo.com/tv/show/1034:4808965641666652?mid=4808968712488596',
+        'info_dict': {
+            'id': '4808965641666652',
+            'ext': 'mp4',
+            'title': 'You should have servants to massage you,... 来自Hosico_猫 - 微博',
+        },
+    }]
+
+    # https://weibo.com/tv/api/component?page=/tv/show/1034:4808965641666652
+    # https://weibo.com/2488492271/M3RhWeMSP?pagetype=profilefeed
 
     def _real_extract(self, url):
         video_id = self._match_id(url)
@@ -103,15 +114,23 @@ class WeiboIE(InfoExtractor):
 
 class WeiboMobileIE(InfoExtractor):
     _VALID_URL = r'https?://m\.weibo\.cn/status/(?P<id>[0-9]+)(\?.+)?'
-    _TEST = {
+    _TESTS = [{
         'url': 'https://m.weibo.cn/status/4189191225395228?wm=3333_2001&sourcetype=weixin&featurecode=newtitle&from=singlemessage&isappinstalled=0',
         'info_dict': {
             'id': '4189191225395228',
             'ext': 'mp4',
             'title': '午睡当然是要甜甜蜜蜜的啦',
-            'uploader': '柴犬柴犬'
-        }
-    }
+            'uploader': '柴犬柴犬',
+        },
+    }, {
+        'url': 'https://m.weibo.cn/status/4800376257119180',
+        'info_dict': {
+            'id': '4800376257119180',
+            'ext': 'mp4',
+            'title': '(G)I-DLE',
+            'uploader': 'Summer__Sama',
+        },
+    }]
 
     def _real_extract(self, url):
         video_id = self._match_id(url)
@@ -128,9 +147,21 @@ class WeiboMobileIE(InfoExtractor):
         title = status_data['status_title']
         uploader = status_data.get('user', {}).get('screen_name')
 
+        formats = [{
+            'format_id': 'stream_url',
+            'url': page_info['media_info']['stream_url']
+        }]
+        for video_quality in ('mp4_ld_mp4', 'mp4_hd_mp4', 'mp4_720p_mp4'):
+            video_url = traverse_obj(page_info, ('urls', video_quality))
+            if video_url:
+                formats.append({
+                    'format_id': video_quality,
+                    'url': video_url,
+                })
+
         return {
             'id': video_id,
             'title': title,
             'uploader': uploader,
-            'url': page_info['media_info']['stream_url']
+            'formats': formats,
         }
