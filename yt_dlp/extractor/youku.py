@@ -10,6 +10,8 @@ from ..utils import (
     js_to_json,
     str_or_none,
     strip_jsonp,
+    traverse_obj,
+    try_call,
 )
 
 
@@ -38,7 +40,8 @@ class YoukuIE(InfoExtractor):
             'uploader_id': '36017967',
             'uploader_url': 'http://i.youku.com/u/UMTQ0MDcxODY4',
             'tags': list,
-        }
+        },
+        'skip': '404 Not Found',
     }, {
         'url': 'http://player.youku.com/player.php/sid/XNDgyMDQ2NTQw/v.swf',
         'only_matching': True,
@@ -55,6 +58,7 @@ class YoukuIE(InfoExtractor):
             'uploader_url': 'http://i.youku.com/u/UMjUwMzMzODky',
             'tags': list,
         },
+        'skip': '404 Not Found',
     }, {
         'url': 'http://v.youku.com/v_show/id_XMTI1OTczNDM5Mg==.html',
         'info_dict': {
@@ -68,6 +72,7 @@ class YoukuIE(InfoExtractor):
             'uploader_url': 'http://i.youku.com/u/UMzA5MTM5NzQzNg==',
             'tags': list,
         },
+        'skip': '404 Not Found',
     }, {
         'url': 'http://v.youku.com/v_show/id_XNjA1NzA2Njgw.html',
         'note': 'Video protected with password',
@@ -85,8 +90,8 @@ class YoukuIE(InfoExtractor):
         'params': {
             'videopassword': '100600',
         },
+        'skip': '404 Not Found',
     }, {
-        # /play/get.json contains streams with "channel_type":"tail"
         'url': 'http://v.youku.com/v_show/id_XOTUxMzg4NDMy.html',
         'info_dict': {
             'id': 'XOTUxMzg4NDMy',
@@ -96,7 +101,7 @@ class YoukuIE(InfoExtractor):
             'thumbnail': r're:^https?://.*',
             'uploader': '明月庄主moon',
             'uploader_id': '38465621',
-            'uploader_url': 'http://i.youku.com/u/UMTUzODYyNDg0',
+            'uploader_url': 'https://i.youku.com/u/UMTUzODYyNDg0',
             'tags': list,
         },
     }, {
@@ -112,6 +117,7 @@ class YoukuIE(InfoExtractor):
             'uploader_url': 'http://i.youku.com/u/UOTUyODk5Ng==',
             'tags': list,
         },
+        'skip': 'Only available in China',
     }, {
         'url': 'http://video.tudou.com/v/XMjE4ODI3OTg2MA==.html',
         'only_matching': True,
@@ -137,24 +143,30 @@ class YoukuIE(InfoExtractor):
         }
         return _dict.get(fm)
 
+    def _get_cna(self, video_id):
+        cna_cookie = try_call(lambda: self._get_cookies('https://log.mmstat.com').get('cna').value)
+        if cna_cookie:
+            return cna_cookie
+
+        _, urlh = self._download_webpage_handle('https://log.mmstat.com/eg.js', video_id, 'Retrieving CNA')
+        # The etag header is '"foobar"'; let's remove the double quotes
+        return urlh.headers['etag'][1:-1]
+
     def _real_extract(self, url):
         video_id = self._match_id(url)
 
         self._set_cookie('youku.com', '__ysuid', self.get_ysuid())
         self._set_cookie('youku.com', 'xreferrer', 'http://www.youku.com')
 
-        _, urlh = self._download_webpage_handle(
-            'https://log.mmstat.com/eg.js', video_id, 'Retrieving cna info')
-        # The etag header is '"foobar"'; let's remove the double quotes
-        cna = urlh.headers['etag'][1:-1]
-
         # request basic data
         basic_data_params = {
             'vid': video_id,
-            'ccode': '0532',
-            'client_ip': '192.168.1.1',
-            'utid': cna,
-            'client_ts': time.time() / 1000,
+            'ccode': '0501',
+            'client_ip': '0.0.0.0',
+            'app_ver': '1.0.75',
+            'utid': self._get_cna(video_id),
+            'client_ts': int(time.time() * 1000),
+            'ckey': 'DIl58SLFxFNndSV1GFNnMQVYkx1PP5tKe1siZu/86PR1u/Wh1Ptd+WOZsHHWxysSfAOhNJpdVWsdVJNsfJ8Sxd8WKVvNfAS8aS8fAOzYARzPyPc3JvtnPHjTdKfESTdnuTW6ZPvk2pNDh4uFzotgdMEFkzQ5wZVXl2Pf1/Y6hLK0OnCNxBj3+nb0v72gZ6b0td+WOZsHHWxysSo/0y9D2K42SaB8Y/+aD2K42SaB8Y/+ahU+WOZsHcrxysooUeND'
         }
 
         video_password = self.get_param('videopassword')
@@ -162,12 +174,11 @@ class YoukuIE(InfoExtractor):
             basic_data_params['password'] = video_password
 
         headers = {
-            'Referer': url,
+            'Referer': 'https://m.youku.com',
         }
         headers.update(self.geo_verification_headers())
         data = self._download_json(
-            'https://ups.youku.com/ups/get.json', video_id,
-            'Downloading JSON metadata',
+            'https://ups.youku.com/ups/get.json', video_id, 'Downloading JSON metadata',
             query=basic_data_params, headers=headers)['data']
 
         error = data.get('error')
@@ -185,31 +196,31 @@ class YoukuIE(InfoExtractor):
                     msg += ': ' + error_note
                 raise ExtractorError(msg)
 
-        # get video title
-        video_data = data['video']
-        title = video_data['title']
+        formats, subtitles = [], {}
+        for format in data['stream']:
+            fmts, subs = self._extract_m3u8_formats_and_subtitles(
+                format.get('m3u8_url'), video_id, ext='mp4', fatal=False)
+            for f in fmts:
+                f['format_id'] = self.get_format_name(format.get('stream_type'))
+                f['height'] = format.get('height')
+                f['width'] = format.get('width')
+                f['filesize'] = format.get('size')
 
-        formats = [{
-            'url': stream['m3u8_url'],
-            'format_id': self.get_format_name(stream.get('stream_type')),
-            'ext': 'mp4',
-            'protocol': 'm3u8_native',
-            'filesize': int(stream.get('size')),
-            'width': stream.get('width'),
-            'height': stream.get('height'),
-        } for stream in data['stream'] if stream.get('channel_type') != 'tail']
+            formats.extend(fmts)
+            self._merge_subtitles(subs, target=subtitles)
+
         self._sort_formats(formats)
-
         return {
             'id': video_id,
-            'title': title,
+            'title': data['video']['title'],
             'formats': formats,
-            'duration': video_data.get('seconds'),
-            'thumbnail': video_data.get('logo'),
-            'uploader': video_data.get('username'),
-            'uploader_id': str_or_none(video_data.get('userid')),
-            'uploader_url': data.get('uploader', {}).get('homepage'),
-            'tags': video_data.get('tags'),
+            'subtitles': subtitles,
+            'duration': traverse_obj(data, ('video', 'seconds')),
+            'thumbnail': traverse_obj(data, ('video', 'logo')),
+            'uploader': traverse_obj(data, ('video', 'username')),
+            'uploader_id': str_or_none(traverse_obj(data, ('video', 'userid'))),
+            'uploader_url': traverse_obj(data, ('uploader', 'homepage')),
+            'tags': traverse_obj(data, ('video', 'tags')),
         }
 
 
