@@ -1,14 +1,11 @@
-from .common import InfoExtractor
-
 import json
 import random
 import re
 
-from ..compat import (
-    compat_parse_qs,
-    compat_str,
-)
+from .common import InfoExtractor
 from ..utils import (
+    determine_ext,
+    int_or_none,
     js_to_json,
     strip_jsonp,
     traverse_obj,
@@ -17,31 +14,99 @@ from ..utils import (
 
 
 class WeiboIE(InfoExtractor):
-    _VALID_URL = r'https?://(?:www\.)?weibo\.com/(?:[^?#]+/)?[0-9]+[/|:](?P<id>[a-zA-Z0-9]+)'
+    _VALID_URL = r'https?://(?:www\.)?weibo\.com/[0-9]+/(?P<id>[a-zA-Z0-9]+)'
     _TESTS = [{
         'url': 'https://weibo.com/6275294458/Fp6RGfbff?type=comment',
         'info_dict': {
             'id': 'Fp6RGfbff',
             'ext': 'mp4',
-            'title': 'You should have servants to massage you,... 来自Hosico_猫 - 微博',
+            'title': 'You should have servants to massage you, pamper you. 💆🏻\u200d♂️',
+            'uploader': 'Hosico_猫',
+            'thumbnail': 'http://wx3.sinaimg.cn/orj480/006QGuKKly1fk8gte6pmnj30zk0k0t9i.jpg',
+            'duration': 43,
         },
     }, {
-        'url': 'https://weibo.com/tv/show/1034:4808965641666652?mid=4808968712488596',
+        'url': 'https://weibo.com/5992567671/M2nIRoZJn?pagetype=hot',
         'info_dict': {
-            'id': '4808965641666652',
+            'id': 'M2nIRoZJn',
             'ext': 'mp4',
-            'title': 'You should have servants to massage you,... 来自Hosico_猫 - 微博',
+            'title': '#野生动物##动物# ～雪地里的北极熊母子～',
+            'uploader': '大自然震撼之美',
+            'thumbnail': 'http://wx3.sinaimg.cn/orj480/006xycBhly8h5gbfdx8pkj30k00soaaz.jpg',
+            'duration': 31,
         },
     }]
 
-    # https://weibo.com/tv/api/component?page=/tv/show/1034:4808965641666652
-    # https://weibo.com/2488492271/M3RhWeMSP?pagetype=profilefeed
-
     def _real_extract(self, url):
         video_id = self._match_id(url)
-        # to get Referer url for genvisitor
-        webpage, urlh = self._download_webpage_handle(url, video_id)
+        api_response = self._download_json(f'https://weibo.com/ajax/statuses/show?id={video_id}', video_id)
+        media_info = api_response['page_info']['media_info']
 
+        formats, subtitles = [], {}
+        for format_id in ('stream_url', 'mp4_sd_url', 'h265_mp4_ld', 'h265_mp4_hd', 'stream_url_hd', 'mp4_hd_url',
+                          'inch_4_mp4_hd', 'inch_5_mp4_hd', 'inch_5_5_mp4_hd', 'mp4_720p_mp4', 'hevc_mp4_720p'):
+            format_url = media_info.get(format_id)
+            if not format_url:
+                continue
+
+            ext = determine_ext(format_url)
+            if ext == 'm3u8':
+                fmts, subs = self._extract_m3u8_formats_and_subtitles(
+                    format_url, video_id, 'mp4', entry_protocol='m3u8_native', m3u8_id=format_id, fatal=False)
+                formats.extend(fmts)
+                self._merge_subtitles(subs, target=subtitles)
+            else:
+                formats.append({
+                    'format_id': format_id,
+                    'url': format_url
+                })
+
+        return {
+            'id': video_id,
+            'title': media_info.get('next_title') or media_info.get('kol_title'),
+            'uploader': media_info.get('author_name'),
+            'formats': formats,
+            'subtitles': subtitles,
+            'thumbnail': traverse_obj(api_response, ('page_info', 'page_pic')),
+            'duration': media_info.get('duration')
+        }
+
+
+class WeiboTvIE(InfoExtractor):
+    IE_NAME = 'weibo:tv'
+    _VALID_URL = r'https?://(?:www\.)?weibo\.com/tv/show/(?P<id>[\w:]+)'
+
+    _TESTS = [{
+        'url': 'https://weibo.com/tv/show/1034:4784955918843950',
+        'info_dict': {
+            'id': '1034:4784955918843950',
+            'title': '每天需要搬多少砖，才能够拥有她？',
+            'ext': 'mp4',
+            'thumbnail': 'http://wx4.sinaimg.cn/large/0079seP1ly1h3mppnrcmnj30no0dcq4r.jpg',
+            'duration': 202.222,
+            'uploader': '姚希妍',
+            'timestamp': 1656305854,
+            'upload_date': '20220627',
+        },
+    }, {
+        'url': 'https://weibo.com/tv/show/1034:4765854085349511',
+        'info_dict': {
+            'id': '1034:4765854085349511',
+            'title': 'glass house mountain 爬山vlog',
+            'ext': 'mp4',
+            'thumbnail': 'http://wx1.sinaimg.cn/orj480/cf56f4e7gy1h1xrw4ul8tj21hc0u0qc1.jpg',
+            'duration': 69.518,
+            'uploader': '毛毛虫Claire',
+            'timestamp': 1651751622,
+            'upload_date': '20220505',
+        },
+    }]
+
+    def _check_passport(self, url, video_id):
+        if self._get_cookies('https://weibo.com').get('SUB'):
+            return
+
+        webpage, urlh = self._download_webpage_handle(url, video_id)
         visitor_url = urlh.geturl()
 
         if 'passport.weibo.com' in visitor_url:
@@ -55,10 +120,10 @@ class WeiboIE(InfoExtractor):
                     'cb': 'gen_callback',
                     'fp': json.dumps({
                         'os': '2',
-                        'browser': 'Gecko57,0,0,0',
+                        'browser': 'Gecko104,0,0,0',
                         'fonts': 'undefined',
                         'screenInfo': '1440*900*24',
-                        'plugins': '',
+                        'plugins': 'Portable Document Format::internal-pdf-viewer::PDF Viewer|Portable Document Format::internal-pdf-viewer::Chrome PDF Viewer',
                     }),
                 }))
 
@@ -78,37 +143,33 @@ class WeiboIE(InfoExtractor):
                     '_rand': random.random(),
                 })
 
-            webpage = self._download_webpage(
-                url, video_id, note='Revisiting webpage')
+    def _real_extract(self, url):
+        video_id = self._match_id(url)
+        self._check_passport(url, video_id)
 
-        title = self._html_extract_title(webpage)
+        request_data = json.dumps({"Component_Play_Playinfo": {"oid": video_id}}, separators=(',', ':'))
 
-        video_formats = compat_parse_qs(self._search_regex(
-            r'video-sources=\\\"(.+?)\"', webpage, 'video_sources'))
+        video_info = self._download_json(
+            'https://weibo.com/tv/api/component', video_id, data=bytes(f'data={request_data}', 'utf-8'),
+            query={'page': f'/tv/show/{video_id}'}, headers={'Referer': url})['data']['Component_Play_Playinfo']
 
         formats = []
-        supported_resolutions = (480, 720)
-        for res in supported_resolutions:
-            vid_urls = video_formats.get(compat_str(res))
-            if not vid_urls or not isinstance(vid_urls, list):
-                continue
-
-            vid_url = vid_urls[0]
+        for format_id in video_info['urls']:
             formats.append({
-                'url': vid_url,
-                'height': res,
+                'format_id': format_id,
+                'url': f'https:{video_info["urls"][format_id]}',
+                'height': int_or_none(self._search_regex(r'(\d+)P$', format_id, 'format height', default=None)),
             })
 
         self._sort_formats(formats)
-
-        uploader = self._og_search_property(
-            'nick-name', webpage, 'uploader', default=None)
-
         return {
             'id': video_id,
-            'title': title,
-            'uploader': uploader,
-            'formats': formats
+            'title': video_info['title'],
+            'formats': formats,
+            'thumbnail': video_info.get('cover_image'),
+            'duration': video_info.get('duration_time'),
+            'uploader': video_info.get('author'),
+            'timestamp': video_info.get('real_date'),
         }
 
 
