@@ -1,6 +1,7 @@
 import binascii
 import io
 import re
+import time
 import urllib.parse
 
 from . import get_suitable_downloader
@@ -58,6 +59,7 @@ class HlsManifest:
         return {
             'media_frags': media_frags,
             'ad_frags': ad_frags,
+            'target_duration': target_duration,
         }
 
     @staticmethod
@@ -80,7 +82,7 @@ class HlsManifest:
                     if ad_frag_next:
                         continue
                     frag_index += 1
-                    if frag_index <= fragment_index:
+                    if fragment_index and frag_index <= fragment_index:
                         continue
                     frag_url = (
                         line
@@ -387,3 +389,82 @@ class HlsFD(FragmentFD):
                 ctx, fragments, info_dict, pack_func=pack_fragment, finish_func=fin_fragments)
         else:
             return self.download_and_append_fragments(ctx, fragments, info_dict)
+
+class HlsLiveFD(FragmentFD):
+    FD_NAME = 'hls-live-native'
+
+    @staticmethod
+    def _update_media_playlist(media_playlist, new_fragments):
+        media_playlist_sequences = media_playlist.keys()
+        new_fragments_media_sequences = [fragment['media_sequence'] for fragment in new_fragments]
+
+        new_media_playlist_sequences = list(set(new_fragments_media_sequences) - set(media_playlist_sequences))
+        print(new_media_playlist_sequences)
+
+        for media_sequence in new_media_playlist_sequences:
+            media_playlist[media_sequence] = next(
+                (item for item in new_fragments if item["media_sequence"] == media_sequence), None)
+
+        return media_playlist
+
+    def real_download(self, filename, info_dict):
+        media_playlist = {}
+        current_media_sequence = None
+        fragments_to_download = None
+
+        while True:
+            print('HlsLiveFD')
+            manifest_url = info_dict['url']
+            self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
+
+            urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
+            manifest_url = urlh.geturl()
+            manifest = urlh.read().decode('utf-8', 'ignore')
+
+            manifest_stats = HlsManifest.get_stats(manifest)
+            ctx = {
+                'filename': filename,
+                'total_frags': manifest_stats['media_frags'],
+                'ad_frags': manifest_stats['ad_frags'],
+            }
+
+            ctx.setdefault('extra_state', {})
+
+            fragments = HlsManifest.get_fragments(manifest, manifest_url, info_dict.get('format_index'))
+
+            media_playlist = self._update_media_playlist(media_playlist, fragments)
+
+            if current_media_sequence is None:
+                current_media_sequence = min(media_playlist.keys())
+
+            max_media_playlist_sequence = max(media_playlist.keys())
+
+            print(current_media_sequence == max_media_playlist_sequence)
+
+            if current_media_sequence == max_media_playlist_sequence:
+                fragments_to_download = None
+            else:
+                fragments_to_download = {
+                    'start': current_media_sequence,
+                    'end': max_media_playlist_sequence
+                }
+
+                current_media_sequence = max_media_playlist_sequence
+
+            print(fragments_to_download)
+            print(f'Sleeping for: {manifest_stats["target_duration"]}')
+            if fragments_to_download:
+                for media_sequence in [x for x in
+                                       range(fragments_to_download['start'] + 1, fragments_to_download['end'] + 1)]:
+
+                    self._prepare_frag_download(ctx)
+                    print(media_playlist[media_sequence])
+                    ctx['fragment_index'] = media_sequence
+
+                    decrypt_fragment = self.decrypter(info_dict)
+                    self._download_fragment(ctx, media_playlist[media_sequence]['url'], info_dict)
+                    self._append_fragment(ctx, decrypt_fragment(media_playlist[media_sequence], self._read_fragment(ctx)))
+
+            time.sleep(manifest_stats['target_duration'])
+
+        raise Exception
