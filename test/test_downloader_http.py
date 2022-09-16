@@ -15,6 +15,7 @@ import threading
 from test.helper import http_server_port, try_rm
 from yt_dlp import YoutubeDL
 from yt_dlp.downloader.http import HttpFD
+from yt_dlp.downloader.common import PersistentDownloadingQueue
 from yt_dlp.utils import encodeFilename
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -110,6 +111,45 @@ class TestHttpFD(unittest.TestCase):
         self.download_all({
             'http_chunk_size': 1000,
         })
+
+
+class TestPersistentDownloadingQueue(unittest.TestCase):
+
+    def test_empty(self):
+        downloading_queue = PersistentDownloadingQueue()
+        self.assertEqual(downloading_queue.get_queue(), None)
+
+    def test_multiple_single_inserts(self):
+        downloading_queue = PersistentDownloadingQueue()
+        downloading_queue.insert('0', {'url': 'fragment-0'})
+        downloading_queue.insert('1', {'url': 'fragment-1'})
+
+        self.assertEqual(downloading_queue.get_queue(), {'0': {'url': 'fragment-0'}, '1': {'url': 'fragment-1'}})
+
+    def test_multiple_many_inserts(self):
+        downloading_queue = PersistentDownloadingQueue()
+        downloading_queue.insert_many({'0': {'url': 'fragment-0'}, '1': {'url': 'fragment-1'}})
+        downloading_queue.insert_many({'2': {'url': 'fragment-2'}, '3': {'url': 'fragment-3'}})
+
+        self.assertEqual(downloading_queue.get_queue(), {
+            '0': {'url': 'fragment-0'},
+            '1': {'url': 'fragment-1'},
+            '2': {'url': 'fragment-2'},
+            '3': {'url': 'fragment-3'},
+        })
+
+    def test_multiple_get_queue_requests(self):
+        downloading_queue = PersistentDownloadingQueue()
+        downloading_queue.insert('0', {'url': 'fragment-0'})
+        downloading_queue.insert('1', {'url': 'fragment-1'})
+
+        self.assertEqual(downloading_queue.get_queue(), {'0': {'url': 'fragment-0'}, '1': {'url': 'fragment-1'}})
+        self.assertEqual(downloading_queue.get_queue(), None)
+
+        downloading_queue.insert('1', {'url': 'fragment-1'})
+        downloading_queue.insert('2', {'url': 'fragment-2'})
+        self.assertEqual(downloading_queue.get_queue(), {'2': {'url': 'fragment-2'}})
+        self.assertEqual(downloading_queue.get_queue(), None)
 
 
 if __name__ == '__main__':

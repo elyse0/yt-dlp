@@ -10,6 +10,7 @@ from .fragment import FragmentFD
 from .. import webvtt
 from ..dependencies import Cryptodome_AES
 from ..utils import bug_reports_message, parse_m3u8_attributes, update_url_query, YoutubeDLError, int_or_none
+from .common import PersistentDownloadingQueue
 
 
 class HlsManifestError(YoutubeDLError):
@@ -393,24 +394,8 @@ class HlsFD(FragmentFD):
 class HlsLiveFD(FragmentFD):
     FD_NAME = 'hls-live-native'
 
-    @staticmethod
-    def _update_media_playlist(media_playlist, new_fragments):
-        media_playlist_sequences = media_playlist.keys()
-        new_fragments_media_sequences = [fragment['media_sequence'] for fragment in new_fragments]
-
-        new_media_playlist_sequences = list(set(new_fragments_media_sequences) - set(media_playlist_sequences))
-        print(new_media_playlist_sequences)
-
-        for media_sequence in new_media_playlist_sequences:
-            media_playlist[media_sequence] = next(
-                (item for item in new_fragments if item["media_sequence"] == media_sequence), None)
-
-        return media_playlist
-
     def real_download(self, filename, info_dict):
-        media_playlist = {}
-        current_media_sequence = None
-        fragments_to_download = None
+        downloading_queue = PersistentDownloadingQueue()
 
         while True:
             print('HlsLiveFD')
@@ -431,39 +416,26 @@ class HlsLiveFD(FragmentFD):
             ctx.setdefault('extra_state', {})
 
             fragments = HlsManifest.get_fragments(manifest, manifest_url, info_dict.get('format_index'))
+            fragments_dict = {}
+            for fragment in fragments:
+                fragments_dict[fragment['media_sequence']] = fragment
 
-            media_playlist = self._update_media_playlist(media_playlist, fragments)
-
-            if current_media_sequence is None:
-                current_media_sequence = min(media_playlist.keys())
-
-            max_media_playlist_sequence = max(media_playlist.keys())
-
-            print(current_media_sequence == max_media_playlist_sequence)
-
-            if current_media_sequence == max_media_playlist_sequence:
-                fragments_to_download = None
-            else:
-                fragments_to_download = {
-                    'start': current_media_sequence,
-                    'end': max_media_playlist_sequence
-                }
-
-                current_media_sequence = max_media_playlist_sequence
+            downloading_queue.insert_many(fragments_dict)
+            fragments_to_download = downloading_queue.get_queue()
 
             print(fragments_to_download)
             print(f'Sleeping for: {manifest_stats["target_duration"]}')
             if fragments_to_download:
-                for media_sequence in [x for x in
-                                       range(fragments_to_download['start'] + 1, fragments_to_download['end'] + 1)]:
+                for media_sequence in fragments_to_download:
+                    fragment = downloading_queue.processing_list[media_sequence]
 
                     self._prepare_frag_download(ctx)
-                    print(media_playlist[media_sequence])
+                    print(fragment)
                     ctx['fragment_index'] = media_sequence
 
                     decrypt_fragment = self.decrypter(info_dict)
-                    self._download_fragment(ctx, media_playlist[media_sequence]['url'], info_dict)
-                    self._append_fragment(ctx, decrypt_fragment(media_playlist[media_sequence], self._read_fragment(ctx)))
+                    self._download_fragment(ctx, fragment['url'], info_dict)
+                    self._append_fragment(ctx, decrypt_fragment(fragment, self._read_fragment(ctx)))
 
             time.sleep(manifest_stats['target_duration'])
 

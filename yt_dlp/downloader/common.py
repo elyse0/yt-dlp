@@ -472,3 +472,51 @@ class FileDownloader:
             exe = os.path.basename(str_args[0])
 
         self.write_debug(f'{exe} command line: {shell_quote(str_args)}')
+
+
+from typing import Dict, Generic, TypeVar, Union
+
+T = TypeVar("T")
+
+
+class PersistentDownloadingQueue(Generic[T]):
+    def __init__(self):
+        self.processing_list = {}
+        self.head_key = None
+
+    def _exists(self, key: str):
+        return key in self.processing_list.keys()
+
+    def insert(self, key: str, value: T) -> None:
+        if self._exists(key):
+            return
+
+        self.processing_list[key] = value
+
+    def insert_many(self, new_items_list: Dict[str, T]) -> None:
+        for key in new_items_list.keys():
+            if self._exists(key):
+                continue
+
+            self.insert(key, new_items_list[key])
+
+    def get_queue(self) -> Union[Dict[str, T], None]:
+        processing_list_keys = list(self.processing_list.keys())
+        if not len(processing_list_keys):
+            return None
+
+        if self.head_key is None:
+            self.head_key = processing_list_keys.pop()
+            return self.processing_list
+
+        head_key_index = processing_list_keys.index(self.head_key)
+        queue_keys = processing_list_keys[head_key_index + 1:]
+        if not len(queue_keys):
+            return None
+
+        queue: Dict[str, T] = {}
+        for key in queue_keys:
+            queue[key] = self.processing_list[key]
+
+        self.head_key = queue_keys[-1]
+        return queue

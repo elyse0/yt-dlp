@@ -6,7 +6,7 @@ def get_suitable_downloader(info_dict, params={}, default=NO_DEFAULT, protocol=N
     info_copy = info_dict.copy()
     info_copy['to_stdout'] = to_stdout
 
-    return HlsLiveFD
+    return DashLiveFD
 
     protocols = (protocol or info_copy['protocol']).split('+')
     downloaders = [_get_suitable_downloader(info_copy, proto, params, default) for proto in protocols]
@@ -24,7 +24,7 @@ def get_suitable_downloader(info_dict, params={}, default=NO_DEFAULT, protocol=N
 
 # Some of these require get_suitable_downloader
 from .common import FileDownloader
-from .dash import DashSegmentsFD
+from .dash import DashSegmentsFD, DashLiveFD
 from .external import FFmpegFD, get_external_downloader
 from .f4m import F4mFD
 from .fc2 import FC2LiveFD
