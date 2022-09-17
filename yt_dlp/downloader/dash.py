@@ -452,68 +452,56 @@ class DashLiveFD(FragmentFD):
 
         return manifest, urlh
 
-    def _download_format(self, info_dict, filename, requested_format):
+    def real_download(self, filename, info_dict):
         print('DashLiveFD')
         self.to_screen('[%s] Downloading mpd manifest' % self.FD_NAME)
 
-        ctx = {
-            'filename': filename,
-            'total_frags': 5,
-            'ad_frags': 0,
-        }
+        manifest_url = info_dict['url'].split('\n')[0]
 
-        downloading_queue = PersistentDownloadingQueue()
-        manifest_url = requested_format['manifest_url']
-        format_id = requested_format['format_id']
+        requested_formats_dict = {}
+        for requested_format in info_dict['requested_formats']:
+            requested_format_id = requested_format['format_id']
+            requested_formats_dict[requested_format_id] = requested_format
+            requested_formats_dict[requested_format_id]['queue'] = PersistentDownloadingQueue()
 
         while True:
-            print("Format thread: ", requested_format['format_id'])
-
             manifest, urlh = self._download_manifest_handler(info_dict, manifest_url)
             manifest_url = urlh.geturl()
+
+            ctx = {
+                'total_frags': 5,
+                'ad_frags': 0,
+            }
 
             formats, _ = DashManifest.get_formats_and_subtitles(
                 manifest, mpd_base_url=base_url(manifest_url), mpd_url=manifest_url)
 
-            requested_format  = next(fmt for fmt in formats if fmt['format_id'] == format_id)
+            for requested_format_id in requested_formats_dict:
+                requested_format = next(fmt for fmt in formats if fmt['format_id'] == requested_format_id)
+                ctx['filename'] = requested_formats_dict[requested_format_id]['filepath']
 
-            fragments_dict = {}
-            for fragment in requested_format['fragments']:
-                fragments_dict[fragment['path']] = fragment
+                fragments_dict = {}
+                for fragment in requested_format['fragments']:
+                    fragments_dict[fragment['path']] = fragment
 
-            downloading_queue.insert_many(fragments_dict)
-            fragments_queue = downloading_queue.get_queue().copy()
-            if not fragments_queue:
-                continue
+                downloading_queue = requested_formats_dict[requested_format_id]['queue']
 
-            for key in fragments_queue:
-                fragment = fragments_queue[key]
+                downloading_queue.insert_many(fragments_dict)
+                fragments_queue = downloading_queue.get_queue()
 
-                self._prepare_frag_download(ctx)
-                # ctx['fragment_index'] = fragment
-                # decrypt_fragment = self.decrypter(info_dict)
-                print(fragment)
-                self._download_fragment(ctx, f'{requested_format["fragment_base_url"]}{fragment["path"]}', info_dict)
-                self._append_fragment(ctx, self._read_fragment(ctx))
+                if not fragments_queue:
+                    continue
+
+                for key in fragments_queue:
+                    fragment = fragments_queue[key]
+
+                    self._prepare_frag_download(ctx)
+                    # ctx['fragment_index'] = fragment
+                    # decrypt_fragment = self.decrypter(info_dict)
+                    self._download_fragment(
+                        ctx, f'{requested_format["fragment_base_url"]}{fragment["path"]}', info_dict)
+                    self._append_fragment(ctx, self._read_fragment(ctx))
 
             time.sleep(9)
-
-    def real_download(self, filename, info_dict):
-        class FTPE(concurrent.futures.ThreadPoolExecutor):
-            # has to stop this or it's going to wait on the worker thread itself
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        tpe = FTPE(4)
-
-        spins = []
-        for requested_format in info_dict['requested_formats']:
-            # if not self._ensure_dir_exists(filename):
-            #    return
-            job = tpe.submit(self._download_format, info_dict, requested_format['filepath'], requested_format)
-            spins.append(job)
-
-        for job in spins:
-            result = job.result()
 
         raise Exception
