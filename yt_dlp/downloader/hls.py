@@ -27,12 +27,14 @@ class HlsManifest:
     @staticmethod
     def is_ad_fragment_start(line):
         return (line.startswith('#ANVATO-SEGMENT-INFO') and 'type=ad' in line
-                or line.startswith('#UPLYNK-SEGMENT') and line.endswith(',ad'))
+                or line.startswith('#UPLYNK-SEGMENT') and line.endswith(',ad')
+                or line.startswith('#EXT-X-DATERANGE') and 'X-TV-TWITCH-AD' in line)
 
     @staticmethod
     def is_ad_fragment_end(line):
         return (line.startswith('#ANVATO-SEGMENT-INFO') and 'type=master' in line
-                or line.startswith('#UPLYNK-SEGMENT') and line.endswith(',segment'))
+                or line.startswith('#UPLYNK-SEGMENT') and line.endswith(',segment')
+                or line.startswith('#EXT-X-DISCONTINUITY'))
 
     @staticmethod
     def get_stats(manifest):
@@ -40,6 +42,7 @@ class HlsManifest:
         ad_frags = 0
         ad_frag_next = False
         target_duration = 0
+        media_sequence = 0
         for line in manifest.splitlines():
             line = line.strip()
             if not line:
@@ -51,6 +54,8 @@ class HlsManifest:
                     ad_frag_next = True
                 elif HlsManifest.is_ad_fragment_end(line):
                     ad_frag_next = False
+                if line.startswith('#EXT-X-MEDIA-SEQUENCE'):
+                    media_sequence = int(line[22:])
                 continue
             if ad_frag_next:
                 ad_frags += 1
@@ -61,6 +66,7 @@ class HlsManifest:
             'media_frags': media_frags,
             'ad_frags': ad_frags,
             'target_duration': target_duration,
+            'media_sequence': media_sequence,
         }
 
     @staticmethod
@@ -397,46 +403,52 @@ class HlsLiveFD(FragmentFD):
     def real_download(self, filename, info_dict):
         downloading_queue = PersistentDownloadingQueue()
 
-        while True:
-            print('HlsLiveFD')
-            manifest_url = info_dict['url']
-            self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
+        ctx = {
+            'filename': filename,
+            'started': time.time(),
+        }
+        ctx.setdefault('extra_state', {})
 
-            urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
-            manifest_url = urlh.geturl()
-            manifest = urlh.read().decode('utf-8', 'ignore')
+        try:
+            while True:
+                manifest_url = info_dict['url']
+                self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
 
-            manifest_stats = HlsManifest.get_stats(manifest)
-            ctx = {
-                'filename': filename,
-                'total_frags': manifest_stats['media_frags'],
-                'ad_frags': manifest_stats['ad_frags'],
-            }
+                urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
+                manifest_url = urlh.geturl()
+                manifest = urlh.read().decode('utf-8', 'ignore')
 
-            ctx.setdefault('extra_state', {})
+                manifest_stats = HlsManifest.get_stats(manifest)
+                print(manifest_stats)
 
-            fragments = HlsManifest.get_fragments(manifest, manifest_url, info_dict.get('format_index'))
-            fragments_dict = {}
-            for fragment in fragments:
-                fragments_dict[fragment['media_sequence']] = fragment
+                if 'twitch-stitched-ad' in manifest:
+                    time.sleep(manifest_stats['target_duration'])
+                    continue
 
-            downloading_queue.insert_many(fragments_dict)
-            fragments_to_download = downloading_queue.get_queue()
+                ctx['total_frags'] = manifest_stats['media_frags']
+                ctx['ad_frags'] = manifest_stats['ad_frags']
 
-            print(fragments_to_download)
-            print(f'Sleeping for: {manifest_stats["target_duration"]}')
-            if fragments_to_download:
-                for media_sequence in fragments_to_download:
-                    fragment = downloading_queue.processing_list[media_sequence]
+                fragments = HlsManifest.get_fragments(manifest, manifest_url, info_dict.get('format_index'))
+                fragments_dict = {}
+                for fragment in fragments:
+                    fragments_dict[fragment['media_sequence']] = fragment
 
-                    self._prepare_frag_download(ctx)
-                    print(fragment)
-                    ctx['fragment_index'] = media_sequence
+                downloading_queue.insert_many(fragments_dict)
+                fragments_to_download = downloading_queue.get_queue()
 
-                    decrypt_fragment = self.decrypter(info_dict)
-                    self._download_fragment(ctx, fragment['url'], info_dict)
-                    self._append_fragment(ctx, decrypt_fragment(fragment, self._read_fragment(ctx)))
+                print(f'Sleeping for: {manifest_stats["target_duration"]}')
+                if fragments_to_download:
+                    for media_sequence in fragments_to_download:
+                        fragment = downloading_queue.processing_list[media_sequence]
 
-            time.sleep(manifest_stats['target_duration'])
+                        self._prepare_frag_download(ctx)
+                        ctx['fragment_index'] = media_sequence
 
-        raise Exception
+                        decrypt_fragment = self.decrypter(info_dict)
+                        self._download_fragment(ctx, fragment['url'], info_dict)
+                        self._append_fragment(ctx, decrypt_fragment(fragment, self._read_fragment(ctx)))
+
+                time.sleep(manifest_stats['target_duration'])
+        except KeyboardInterrupt:
+            print('Print hello there')
+            self._finish_frag_download(ctx, info_dict)
