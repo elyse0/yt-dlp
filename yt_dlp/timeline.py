@@ -15,11 +15,13 @@ class TimelineSegment(Segment):
 class TimelineSignatureSegment(TimelineSegment):
     track_id: str
     filename: str
+    base_url: str
 
 class Timeline:
-    def __init__(self, track_id: str, filename: str):
+    def __init__(self, track_id: str, filename: str, base_url: str):
         self.track_id = track_id
         self.filename = filename
+        self.base_url = base_url
         self.segments: List[TimelineSegment] = []
 
     def get_signature_segments(self) -> List[TimelineSignatureSegment]:
@@ -28,6 +30,7 @@ class Timeline:
             signature_segments.append({
                 'track_id': self.track_id,
                 'filename': self.filename,
+                'base_url': self.base_url,
                 'start': segment['start'],
                 'end': segment['end'],
                 'data': segment['data'],
@@ -58,6 +61,12 @@ class Timeline:
         return list(filter(lambda segment: segment['start'] >= cursor, self.segments))
 
     def _insert_timeline_segment(self, segment: Segment, filling: bool):
+        print(segment)
+        if not segment['data']:
+            return
+        if 'init-stream' in segment['data']['path']:
+            return
+
         timeline_segment: TimelineSegment = {
             'start': segment['start'],
             'end': segment['end'],
