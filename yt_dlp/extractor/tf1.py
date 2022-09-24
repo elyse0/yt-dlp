@@ -83,11 +83,21 @@ class TF1IE(InfoExtractor):
 
 
 class TF1DirectIE(InfoExtractor):
-    _VALID_URL = r'https?://(?:www\.)?tf1\.fr/tf1/direct'
+    _VALID_URL = r'https?://(?:www\.)?tf1\.fr/(?P<id>[\w-]+)/direct'
     _TESTS = []
 
+    @staticmethod
+    def _get_live_id(display_id):
+        if display_id == 'tf1':
+            return 'L_TF1'
+        elif display_id == 'tf1-series-films':
+            return 'L_TF1-SERIES-FILMS'
+
     def _real_extract(self, url):
-        stream_response = self._download_json('https://mediainfo.tf1.fr/mediainfocombo/L_TF1?context=MYTF1', 'stream')
+        display_id = self._match_id(url)
+        live_id = self._get_live_id(display_id)
+
+        stream_response = self._download_json(f'https://mediainfo.tf1.fr/mediainfocombo/{live_id}?context=MYTF1', 'stream')
 
         formats, subtitles = self._extract_mpd_formats_and_subtitles(stream_response['delivery']['url'], 'stream')
 
