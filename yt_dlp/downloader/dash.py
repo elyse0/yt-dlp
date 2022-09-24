@@ -467,37 +467,85 @@ class DashLiveFD(FragmentFD):
 
         tracks = []
         for requested_format in info_dict['requested_formats']:
-            tracks.append(Timeline(requested_format['format_id'], requested_format['filepath']))
+            print(requested_format)
+            tracks.append(Timeline(
+                requested_format['format_id'],
+                requested_format['filepath'],
+                requested_format['fragment_base_url'],
+            ))
+
+        ctx = {
+            'total_frags': 5,
+            'ad_frags': 0,
+            'started': time.time(),
+        }
+
+        print(info_dict['requested_formats'])
+
+        # Init files
+        for requested_format in info_dict['requested_formats']:
+            init_stream = requested_format['fragments'][0]
+
+            ctx['filename'] = requested_format['filepath']
+            self._prepare_frag_download(ctx)
+            # ctx['fragment_index'] = fragment
+            # decrypt_fragment = self.decrypter(info_dict)
+            self._download_fragment(
+                ctx, f'{requested_format["fragment_base_url"]}{init_stream["path"]}', info_dict)
+            self._append_fragment(ctx, self._read_fragment(ctx))
 
         playback = Playback(tracks)
 
-        while True:
-            manifest, urlh = self._download_manifest_handler(info_dict, manifest_url)
-            manifest_url = urlh.geturl()
+        try:
+            while True:
+                manifest, urlh = self._download_manifest_handler(info_dict, manifest_url)
+                manifest_url = urlh.geturl()
 
-            ctx = {
-                'total_frags': 5,
-                'ad_frags': 0,
-            }
+                formats, _ = DashManifest.get_formats_and_subtitles(
+                    manifest, mpd_base_url=base_url(manifest_url), mpd_url=manifest_url)
 
-            formats, _ = DashManifest.get_formats_and_subtitles(
-                manifest, mpd_base_url=base_url(manifest_url), mpd_url=manifest_url)
+                for fmt in formats:
+                    print(fmt)
+                    track = playback.get_track(fmt['format_id'])
+                    fragments = filter(lambda fragment: fragment.get('start'), fmt['fragments'])
+                    track.insert_many(list(map(lambda fragment: {
+                        'start': fragment['start'],
+                        'end': fragment['end'],
+                        'data': {
+                            'path': fragment['path']
+                        },
+                    }, fragments)))
 
-            for fmt in formats:
-                print(fmt)
-                track = playback.get_track(fmt['format_id'])
-                track.insert_many(fmt['fragments'])
+                seek = playback.seek()
+                print('Seek!')
+                print(seek)
+
+                for playback_segment in seek:
+                    ctx['filename'] = playback_segment['filename']
+                    self._prepare_frag_download(ctx)
+                    # ctx['fragment_index'] = fragment
+                    # decrypt_fragment = self.decrypter(info_dict)
+                    self._download_fragment(
+                        ctx, f'{playback_segment["base_url"]}{playback_segment["data"]["path"]}', info_dict)
+                    self._append_fragment(ctx, self._read_fragment(ctx))
+
+                time.sleep(9)
+        except KeyboardInterrupt:
+            pass;
+
+        min_start = min(list(map(lambda track: track.get_start(), playback.tracks)))
+
+        for requested_format in info_dict['requested_formats']:
+            track = next(track for track in playback.tracks if track.track_id == requested_format['format_id'])
+            track_start = track.get_start()
+
+            if track_start > min_start:
+                requested_format['offset'] = track_start - min_start
+
+            ctx['filename'] = requested_format['filepath']
+            self._prepare_frag_download(ctx)
+            self._finish_frag_download(ctx, info_dict)
+
+        return True, True
 
 
-            for playback_segment in playback.seek():
-                ctx['filename'] = playback_segment['filename']
-                self._prepare_frag_download(ctx)
-                # ctx['fragment_index'] = fragment
-                # decrypt_fragment = self.decrypter(info_dict)
-                self._download_fragment(
-                    ctx, f'{playback_segment["data"]["base_url"]}{playback_segment["data"]["path"]}', info_dict)
-                self._append_fragment(ctx, self._read_fragment(ctx))
-
-            time.sleep(9)
-
-        raise Exception
