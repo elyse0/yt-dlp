@@ -813,19 +813,24 @@ class FFmpegMergerPP(FFmpegPostProcessor):
     def run(self, info):
         filename = info['filepath']
         temp_filename = prepend_extension(filename, 'temp')
-        args = ['-c', 'copy']
+        output_opts = ['-c', 'copy']
         audio_streams = 0
         for (i, fmt) in enumerate(info['requested_formats']):
             if fmt.get('acodec') != 'none':
-                args.extend(['-map', f'{i}:a:0'])
+                output_opts.extend(['-map', f'{i}:a:0'])
                 aac_fixup = fmt['protocol'].startswith('m3u8') and self.get_audio_codec(fmt['filepath']) == 'aac'
                 if aac_fixup:
-                    args.extend([f'-bsf:a:{audio_streams}', 'aac_adtstoasc'])
+                    output_opts.extend([f'-bsf:a:{audio_streams}', 'aac_adtstoasc'])
                 audio_streams += 1
             if fmt.get('vcodec') != 'none':
-                args.extend(['-map', '%u:v:0' % (i)])
+                output_opts.extend(['-map', '%u:v:0' % (i)])
+
+        input_path_opts = []
+        for (i, fmt) in enumerate(info['requested_formats']):
+            input_path_opts.append((fmt['filepath'], ['-itsoffset', str(fmt['offset'])] if fmt.get('offset') else []))
+
         self.to_screen('Merging formats into "%s"' % filename)
-        self.run_ffmpeg_multiple_files(info['__files_to_merge'], temp_filename, args)
+        self.real_run_ffmpeg(input_path_opts, [(temp_filename, output_opts)])
         os.rename(encodeFilename(temp_filename), encodeFilename(filename))
         return info['__files_to_merge'], info
 
