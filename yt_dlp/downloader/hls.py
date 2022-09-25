@@ -24,15 +24,22 @@ class HlsMediaManifest:
                 or line.startswith('#UPLYNK-SEGMENT') and line.endswith(',segment'))
 
     @staticmethod
+    def _is_target_duration(line):
+        return line.startswith('#EXT-X-TARGETDURATION')
+
+    @staticmethod
     def get_stats(manifest):
         media_frags = 0
         ad_frags = 0
+        target_duration = 0
         ad_frag_next = False
         for line in manifest.splitlines():
             line = line.strip()
             if not line:
                 continue
             if line.startswith('#'):
+                if HlsMediaManifest._is_target_duration(line):
+                    target_duration = int(re.search(r'(\d+)', line).group(1))
                 if HlsMediaManifest.is_ad_fragment_start(line):
                     ad_frag_next = True
                 elif HlsMediaManifest.is_ad_fragment_end(line):
@@ -46,6 +53,7 @@ class HlsMediaManifest:
         return {
             'media_frags': media_frags,
             'ad_frags': ad_frags,
+            'target_duration': target_duration,
         }
 
     @staticmethod
