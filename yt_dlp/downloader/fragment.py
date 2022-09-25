@@ -529,4 +529,8 @@ class FragmentFD(FileDownloader):
         if finish_func is not None:
             ctx['dest_stream'].write(finish_func())
             ctx['dest_stream'].flush()
-        return self._finish_frag_download(ctx, info_dict)
+
+        if not ctx.get('live'):
+            self._finish_frag_download(ctx, info_dict)
+
+        return True
