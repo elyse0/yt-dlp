@@ -1,9 +1,11 @@
 import binascii
 import io
 import re
+import time
 import urllib.parse
 
 from . import get_suitable_downloader
+from .utils.processing_list import NonDuplicateProcessingList
 from .external import FFmpegFD
 from .fragment import FragmentFD
 from .. import webvtt
@@ -58,8 +60,10 @@ class HlsMediaManifest:
 
     @staticmethod
     def get_fragments(manifest, manifest_url, format_index=None, fragment_index=None, extra_query=None):
-        fragments = []
+        if 'twitch-stitched-ad' in manifest:
+            return []
 
+        fragments = []
         i = 0
         media_sequence = 0
         decrypt_info = {'METHOD': 'NONE'}
@@ -380,3 +384,43 @@ class HlsFD(FragmentFD):
                 ctx, fragments, info_dict, pack_func=pack_fragment, finish_func=fin_fragments)
         else:
             return self.download_and_append_fragments(ctx, fragments, info_dict)
+
+
+class HlsLiveFD(FragmentFD):
+    FD_NAME = 'hls-live-native'
+
+    def real_download(self, filename, info_dict):
+        ctx = {
+            'filename': filename,
+            'started': time.time(),
+            'live': True
+        }
+        ctx.setdefault('extra_state', {})
+
+        self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
+        self._prepare_frag_download(ctx)
+
+        processing_list = NonDuplicateProcessingList()
+        try:
+            while True:
+                urlh = self.ydl.urlopen(self._prepare_url(info_dict, info_dict['url']))
+                manifest_url = urlh.geturl()
+                manifest = urlh.read().decode('utf-8', 'ignore')
+
+                manifest_stats = HlsMediaManifest.get_stats(manifest)
+                ctx['total_frags'] = manifest_stats['media_frags']
+                ctx['ad_frags'] = manifest_stats['ad_frags']
+                target_duration = manifest_stats['target_duration']
+
+                fragments = HlsMediaManifest.get_fragments(manifest, manifest_url, info_dict.get('format_index'))
+                processing_list.insert_many({fragment['media_sequence']: fragment for fragment in fragments})
+
+                fragments_to_download = processing_list.seek()
+                if not fragments_to_download:
+                    time.sleep(target_duration)
+                    continue
+
+                self.download_and_append_fragments(ctx, list(fragments_to_download.values()), info_dict)
+                time.sleep(target_duration)
+        except KeyboardInterrupt:
+            self._finish_frag_download(ctx, info_dict)
