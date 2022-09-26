@@ -4,10 +4,15 @@ import re
 import time
 import urllib.parse
 
+from typing import List, Optional, TypedDict
 from . import get_suitable_downloader
 from .fragment import FragmentFD
+from .utils.timeline import DashTimeline
+from .utils.playback import Playback, PlaybackFinish
+from ..compat import compat_etree_fromstring
 from ..utils import (
     ExtractorError,
+    base_url,
     float_or_none,
     int_or_none,
     mimetype2ext,
@@ -15,8 +20,17 @@ from ..utils import (
     parse_duration,
     try_call,
     try_get,
+    unified_timestamp,
     urljoin,
 )
+
+
+class DashFragment(TypedDict):
+    url: Optional[str]
+    path: Optional[str]
+    duration: float
+    start: float
+    end: float
 
 
 class MpdManifest:
@@ -454,3 +468,108 @@ class DashSegmentsFD(FragmentFD):
                 'index': i,
                 'url': fragment_url,
             }
+
+
+class DashLiveFD(FragmentFD):
+    FD_NAME = 'dash-live-native'
+
+    def _download_manifest_handler(self, info_dict, manifest_url):
+        urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
+        manifest_str = urlh.read().decode('utf-8')
+        manifest = compat_etree_fromstring(manifest_str.encode('utf-8'))
+
+        return manifest, urlh
+
+    def real_download(self, filename, info_dict):
+        self.to_screen('[%s] Downloading mpd manifest' % self.FD_NAME)
+        manifest_url = next((url for url in info_dict['url'].split('\n') if '.mpd' in url), None)
+        if manifest_url is None:
+            manifest_url = set(info_dict['url'].split('\n')).pop()
+
+        start_time = time.time()
+        ctx = {
+            'started': start_time,
+            'live': True
+        }
+
+        requested_formats = info_dict.get('requested_formats')
+        timelines = []
+        if requested_formats:
+            for requested_format in requested_formats:
+                timelines.append(DashTimeline[DashFragment](
+                    requested_format['format_id'], requested_format['filepath'], requested_format['fragment_base_url']))
+        else:
+            timelines.append(DashTimeline[DashFragment](info_dict['format_id'], filename, info_dict['fragment_base_url']))
+
+        span = (0, math.inf) if self.params.get('live_from_start') else (start_time, math.inf)
+        playback = Playback[DashFragment, DashTimeline](timelines, span)
+
+        is_initial = True
+        try:
+            while True:
+                processing_start = time.time()
+
+                manifest, urlh = self._download_manifest_handler(info_dict, manifest_url)
+                manifest_url = urlh.geturl()
+
+                minimum_update_period = manifest.get('minimumUpdatePeriod')
+                if not minimum_update_period:
+                    break
+
+                update_time = float(re.match(r'PT([\d.]+)S', minimum_update_period).group(1))
+
+                new_formats, _ = MpdManifest.parse_formats_and_subtitles(
+                    manifest, mpd_base_url=base_url(manifest_url), mpd_url=manifest_url)
+
+                if is_initial:
+                    for timeline in playback.timelines:
+                        fmt = next(fmt for fmt in new_formats if timeline.timeline_id.startswith(fmt['format_id']))
+
+                        init_stream = fmt['fragments'][0]
+                        init_stream['url'] = urljoin(fmt['fragment_base_url'], init_stream['path'])
+                        init_stream['frag_index'] = 0
+
+                        ctx['filename'] = timeline.filepath
+                        self._prepare_and_start_frag_download(ctx, filename)
+                        self.download_and_append_fragments(ctx, [init_stream], info_dict)
+
+                for timeline in playback.timelines:
+                    fmt = next(fmt for fmt in new_formats if timeline.timeline_id.startswith(fmt['format_id']))
+                    fragments: List[DashFragment] = fmt['fragments'][1:]
+                    timeline.insert_many(fragments)
+
+                for (timeline, fragments) in playback.seek():
+                    new_fragments = []
+                    for (index, fragment) in enumerate(fragments):
+                        new_fragments.append({
+                            **dict(fragment),
+                            'frag_index': index,
+                            'url': urljoin(timeline.base_url, fragment['path']),
+                        })
+
+                    ctx['filename'] = timeline.filepath
+                    self._prepare_and_start_frag_download(ctx, info_dict)
+                    self.download_and_append_fragments(ctx, new_fragments, info_dict)
+
+                is_initial = False
+
+                sleep_time = update_time - (time.time() - processing_start)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        except (KeyboardInterrupt, PlaybackFinish):
+            pass
+
+        playback_start = playback.get_start()
+        for timeline in playback.timelines:
+            timeline_start = playback.get_timeline_start(timeline)
+
+            if requested_formats and not math.isclose(timeline_start, playback_start, abs_tol=0.1, rel_tol=0):
+                requested_format = next(
+                    fmt for fmt in requested_formats if timeline.timeline_id.startswith(fmt['format_id']))
+                requested_format['offset'] = timeline_start - playback_start
+
+            ctx['filename'] = timeline.filepath
+            self._prepare_frag_download(ctx)
+            self._finish_frag_download(ctx, info_dict)
+
+        return True, True
