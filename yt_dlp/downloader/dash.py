@@ -71,7 +71,7 @@ class MpdManifest:
                             r = int(s.get('r', 0))
                             ms_info['total_number'] += 1 + r
                             ms_info['s'].append({
-                                't': int(s.get('t', 0)),
+                                't': int_or_none(s.get('t')),
                                 # @d is mandatory (see [1, 5.3.9.6.2, Table 17, page 60])
                                 'd': int(s.attrib['d']),
                                 'r': r,
@@ -292,13 +292,19 @@ class MpdManifest:
                                     'Bandwidth': bandwidth,
                                     'Number': segment_number,
                                 }
+                                duration = float_or_none(segment_d, representation_ms_info['timescale'])
+                                start = float_or_none(segment_time, representation_ms_info['timescale'])
                                 representation_ms_info['fragments'].append({
                                     media_location_key: segment_url,
-                                    'duration': float_or_none(segment_d, representation_ms_info['timescale']),
+                                    'duration': duration,
+                                    'start': start,
+                                    'end': start + duration,
                                 })
 
                             for num, s in enumerate(representation_ms_info['s']):
-                                segment_time = s.get('t') or segment_time
+                                segment_t = s.get('t')
+                                if segment_t:
+                                    segment_time = segment_t
                                 segment_d = s['d']
                                 add_segment_url()
                                 segment_number += 1
