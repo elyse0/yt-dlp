@@ -76,7 +76,13 @@ class MpdManifest:
             # for us.
             def extract_common(source):
                 segment_timeline = source.find(_add_ns('SegmentTimeline'))
+                fb_start_number = None
+
                 if segment_timeline is not None:
+                    fb_predicted_media = segment_timeline.get('FBPredictedMedia')
+                    if fb_predicted_media:
+                        ms_info['media'] = fb_predicted_media
+
                     s_e = segment_timeline.findall(_add_ns('S'))
                     if s_e:
                         ms_info['total_number'] = 0
@@ -90,7 +96,12 @@ class MpdManifest:
                                 'd': int(s.attrib['d']),
                                 'r': r,
                             })
-                start_number = source.get('startNumber')
+
+                    fb_predicted_media_end_number = segment_timeline.get('FBPredictedMediaEndNumber')
+                    if fb_predicted_media_end_number:
+                        fb_start_number = int(fb_predicted_media_end_number) - ms_info['total_number']
+
+                start_number = source.get('startNumber') or fb_start_number
                 if start_number:
                     ms_info['start_number'] = int(start_number)
                 timescale = source.get('timescale')
@@ -117,7 +128,7 @@ class MpdManifest:
                 if segment_template is not None:
                     extract_common(segment_template)
                     media = segment_template.get('media')
-                    if media:
+                    if ms_info.get('media') is None and media:
                         ms_info['media'] = media
                     initialization = segment_template.get('initialization')
                     if initialization:
