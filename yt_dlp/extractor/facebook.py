@@ -520,6 +520,7 @@ class FacebookIE(InfoExtractor):
                         'uploader_id': try_get(video, lambda x: x['owner']['id']),
                         'timestamp': int_or_none(video.get('publish_time')),
                         'duration': float_or_none(video.get('playable_duration_in_ms'), 1000),
+                        'is_live': video.get('broadcast_status') == 'LIVE',
                     }
                     description = try_get(video, lambda x: x['savable_description']['text'])
                     title = video.get('name')
