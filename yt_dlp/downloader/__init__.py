@@ -15,6 +15,10 @@ def get_suitable_downloader(info_dict, params={}, default=NO_DEFAULT, protocol=N
           and not (to_stdout and len(protocols) > 1)
           and set(protocols) == {'http_dash_segments_generator'}):
         return DashSegmentsFD
+    elif set(downloaders) == {DashLiveFD}:
+        return DashLiveFD
+    elif set(downloaders) == {HlsLiveFD}:
+        return HlsLiveFD
     elif len(downloaders) == 1:
         return downloaders[0]
     return None
@@ -22,11 +26,11 @@ def get_suitable_downloader(info_dict, params={}, default=NO_DEFAULT, protocol=N
 
 # Some of these require get_suitable_downloader
 from .common import FileDownloader
-from .dash import DashSegmentsFD
+from .dash import DashSegmentsFD, DashLiveFD
 from .external import FFmpegFD, get_external_downloader
 from .f4m import F4mFD
 from .fc2 import FC2LiveFD
-from .hls import HlsFD
+from .hls import HlsFD, HlsLiveFD
 from .http import HttpFD
 from .ism import IsmFD
 from .mhtml import MhtmlFD
@@ -104,11 +108,16 @@ def _get_suitable_downloader(info_dict, protocol, params, default):
             return ed
 
     if protocol == 'http_dash_segments':
-        if info_dict.get('is_live') and (external_downloader or '').lower() != 'native':
-            return FFmpegFD
+        if info_dict.get('is_live'):
+            if params.get('hls_prefer_native') is True:
+                return DashLiveFD
+            if (external_downloader or '').lower() != 'native':
+                return FFmpegFD
 
     if protocol in ('m3u8', 'm3u8_native'):
         if info_dict.get('is_live'):
+            if params.get('hls_prefer_native') is True:
+                return HlsLiveFD
             return FFmpegFD
         elif (external_downloader or '').lower() == 'native':
             return HlsFD
