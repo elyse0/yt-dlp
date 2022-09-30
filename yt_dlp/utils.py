@@ -5959,6 +5959,32 @@ class InitializationFragmentError(YoutubeDLError):
             'Initialization fragment found after media fragments, unable to download')
 
 
+from typing import Dict, List, Optional, TypedDict, Union
+
+
+class DecryptInfo(TypedDict):
+    METHOD: str
+    URI: Optional[str]
+    KEY: Optional[bytes]
+    IV: Optional[bytes]
+
+
+class ByteRange(TypedDict):
+    start: int
+    end: int
+
+
+class HlsFragment(TypedDict):
+    frag_index: int
+    url: str
+    decrypt_info: DecryptInfo
+    byte_range: Union[Dict, ByteRange]
+    media_sequence: int
+    automatic_time: bool
+    start: float
+    end: float
+
+
 class HlsMediaManifest:
 
     def __init__(self, manifest, manifest_url):
@@ -6015,7 +6041,7 @@ class HlsMediaManifest:
             'is_end_list': is_end_list,
         }
 
-    def get_fragments(self, format_index=None, fragment_index=None, extra_query=None):
+    def get_fragments(self, format_index=None, fragment_index=None, extra_query=None) -> List[HlsFragment]:
         if 'twitch-stitched-ad' in self.manifest:
             print('Skipping Twitch ads')
             return []
@@ -6025,8 +6051,8 @@ class HlsMediaManifest:
         fragments = []
         i = 0
         media_sequence = 0
-        decrypt_info = {'METHOD': 'NONE'}
-        byte_range = {}
+        decrypt_info: DecryptInfo = {'METHOD': 'NONE'}
+        byte_range: Union[Dict, ByteRange] = {}
         discontinuity_count = 0
         frag_index = 0
         program_date_time: float = time.time() if is_live else 0
@@ -6044,12 +6070,12 @@ class HlsMediaManifest:
                     frag_index += 1
                     if fragment_index is not None and frag_index <= fragment_index:
                         continue
-                    frag_url = (
+                    frag_url: str = (
                         line
                         if re.match(r'^https?://', line)
                         else urllib.parse.urljoin(self.manifest_url, line))
                     if extra_query:
-                        frag_url = update_url_query(frag_url, extra_query)
+                        frag_url: str = update_url_query(frag_url, extra_query)
 
                     frag_start = program_date_time
                     frag_end = program_date_time + duration
@@ -6075,17 +6101,17 @@ class HlsMediaManifest:
                         raise InitializationFragmentError()
                     frag_index += 1
                     map_info = parse_m3u8_attributes(line[11:])
-                    frag_url = (
+                    frag_url: str = (
                         map_info.get('URI')
                         if re.match(r'^https?://', map_info.get('URI'))
                         else urllib.parse.urljoin(self.manifest_url, map_info.get('URI')))
                     if extra_query:
-                        frag_url = update_url_query(frag_url, extra_query)
+                        frag_url: str = update_url_query(frag_url, extra_query)
 
                     if map_info.get('BYTERANGE'):
                         splitted_byte_range = map_info.get('BYTERANGE').split('@')
                         sub_range_start = int(splitted_byte_range[1]) if len(splitted_byte_range) == 2 else byte_range['end']
-                        byte_range = {
+                        byte_range: ByteRange = {
                             'start': sub_range_start,
                             'end': sub_range_start + int(splitted_byte_range[0]),
                         }
