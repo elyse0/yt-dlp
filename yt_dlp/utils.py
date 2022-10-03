@@ -5979,10 +5979,15 @@ class HlsMediaManifest:
     def _is_target_duration(line):
         return line.startswith('#EXT-X-TARGETDURATION')
 
+    @staticmethod
+    def _is_end_list(line):
+        return line.startswith('#EXT-X-ENDLIST')
+
     def get_stats(self):
         media_frags = 0
         ad_frags = 0
         target_duration = 0
+        is_end_list = False
         ad_frag_next = False
         for line in self.manifest.splitlines():
             line = line.strip()
@@ -5991,6 +5996,8 @@ class HlsMediaManifest:
             if line.startswith('#'):
                 if self._is_target_duration(line):
                     target_duration = int(re.search(r'(\d+)', line).group(1))
+                if self._is_end_list(line):
+                    is_end_list = True
                 if self._is_ad_fragment_start(line):
                     ad_frag_next = True
                 elif self._is_ad_fragment_end(line):
@@ -6005,6 +6012,7 @@ class HlsMediaManifest:
             'media_frags': media_frags,
             'ad_frags': ad_frags,
             'target_duration': target_duration,
+            'is_end_list': is_end_list,
         }
 
     def get_fragments(self, format_index=None, fragment_index=None, extra_query=None):
