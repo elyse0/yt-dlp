@@ -6008,6 +6008,12 @@ class HlsMediaManifest:
         }
 
     def get_fragments(self, format_index=None, fragment_index=None, extra_query=None):
+        if 'twitch-stitched-ad' in self.manifest:
+            print('Skipping Twitch ads')
+            return []
+
+        is_live = '#EXT-X-PLAYLIST-TYPE:VOD' not in self.manifest
+
         fragments = []
         i = 0
         media_sequence = 0
@@ -6015,6 +6021,9 @@ class HlsMediaManifest:
         byte_range = {}
         discontinuity_count = 0
         frag_index = 0
+        program_date_time: float = time.time() if is_live else 0
+        automatic_time = True
+        duration = 0
         ad_frag_next = False
         for line in self.manifest.splitlines():
             line = line.strip()
@@ -6034,12 +6043,20 @@ class HlsMediaManifest:
                     if extra_query:
                         frag_url = update_url_query(frag_url, extra_query)
 
+                    frag_start = program_date_time
+                    frag_end = program_date_time + duration
+                    program_date_time += duration
+
                     fragments.append({
                         'frag_index': frag_index,
                         'url': frag_url,
                         'decrypt_info': decrypt_info,
                         'byte_range': byte_range,
                         'media_sequence': media_sequence,
+                        'automatic_time': automatic_time,
+                        'start': frag_start,
+                        'end': frag_end,
+                        'duration': duration,
                     })
                     media_sequence += 1
 
@@ -6065,12 +6082,20 @@ class HlsMediaManifest:
                             'end': sub_range_start + int(splitted_byte_range[0]),
                         }
 
+                    frag_start = program_date_time
+                    frag_end = program_date_time + duration
+                    program_date_time += duration
+
                     fragments.append({
                         'frag_index': frag_index,
                         'url': frag_url,
                         'decrypt_info': decrypt_info,
                         'byte_range': byte_range,
-                        'media_sequence': media_sequence
+                        'media_sequence': media_sequence,
+                        'automatic_time': automatic_time,
+                        'start': frag_start,
+                        'end': frag_end,
+                        'duration': duration,
                     })
                     media_sequence += 1
 
@@ -6103,6 +6128,11 @@ class HlsMediaManifest:
                     ad_frag_next = False
                 elif line.startswith('#EXT-X-DISCONTINUITY'):
                     discontinuity_count += 1
+                elif line.startswith('#EXT-X-PROGRAM-DATE-TIME'):
+                    program_date_time = unified_timestamp(line[25:])
+                    automatic_time = False
+                elif line.startswith('#EXTINF'):
+                    duration = float(re.match(r'#EXTINF:([\d.]+)', line).group(1))
                 i += 1
 
         return fragments
