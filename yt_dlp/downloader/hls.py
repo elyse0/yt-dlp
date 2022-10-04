@@ -1,16 +1,62 @@
 import io
+import math
 import re
+import time
 import urllib.parse
 
 from . import get_suitable_downloader
+from .utils.timeline import HlsTimeline
+from .utils.playback import Playback, PlaybackFinish
 from .external import FFmpegFD
 from .fragment import FragmentFD
 from .. import webvtt
 from ..dependencies import Cryptodome_AES
-from ..utils import HlsMediaManifest, InitializationFragmentError, bug_reports_message
+from ..utils import HlsMediaManifest, HlsFragment, InitializationFragmentError, bug_reports_message
 
 
-class HlsFD(FragmentFD):
+class HlsBaseFD(FragmentFD):
+
+    def _can_be_downloaded_natively_or_with_ffmpeg(self, manifest):
+        allow_unplayable_formats = self.params.get('allow_unplayable_formats')
+
+        is_ffmpeg_available = FFmpegFD.available()
+        is_cryptodome_available = Cryptodome_AES is not None
+        # https://tools.ietf.org/html/draft-pantos-http-live-streaming-17#section-4.3.2.4
+        is_encryption_supported = re.search(r'#EXT-X-KEY:METHOD=(?!NONE|AES-128)', manifest)
+        manifest_has_encryption = '#EXT-X-KEY:METHOD=AES-128' in manifest
+        manifest_has_drm = re.search('|'.join([
+            r'#EXT-X-FAXS-CM:',  # Adobe Flash Access
+            r'#EXT-X-(?:SESSION-)?KEY:.*?URI="skd://',  # Apple FairPlay
+        ]), manifest)
+
+        if manifest_has_drm and not allow_unplayable_formats:
+            self.report_error(
+                'This video is DRM protected; Try selecting another format with --format or '
+                'add --check-formats to automatically fallback to the next best format')
+            return False, False
+
+        if manifest_has_encryption:
+            if not is_cryptodome_available and is_ffmpeg_available:
+                self.report_warning('The stream has AES-128 encryption and pycryptodomex is not available')
+                return True, True
+
+            if not is_cryptodome_available and not is_ffmpeg_available:
+                self.report_warning(
+                    ('The stream has AES-128 encryption and neither ffmpeg nor pycryptodomex are available; '
+                     'Decryption will be performed natively, but will be extremely slow'))
+                return True, False
+
+        return True, False
+
+    def _download_manifest(self, info_dict, manifest_url):
+        urlh = self.ydl.urlopen(self._prepare_url(info_dict, manifest_url))
+        man_url = urlh.geturl()
+        manifest = urlh.read().decode('utf-8', 'ignore')
+
+        return urlh, manifest
+
+
+class HlsFD(HlsBaseFD):
     """
     Download segments in a m3u8 manifest. External downloaders can take over
     the fragment downloads by supporting the 'm3u8_frag_urls' protocol and
@@ -18,38 +64,6 @@ class HlsFD(FragmentFD):
     """
 
     FD_NAME = 'hlsnative'
-
-    @staticmethod
-    def can_download(manifest, info_dict, allow_unplayable_formats=False):
-        UNSUPPORTED_FEATURES = [
-            # r'#EXT-X-BYTERANGE',  # playlists composed of byte ranges of media files [2]
-
-            # Live streams heuristic does not always work (e.g. geo restricted to Germany
-            # http://hls-geo.daserste.de/i/videoportal/Film/c_620000/622873/format,716451,716457,716450,716458,716459,.mp4.csmil/index_4_av.m3u8?null=0)
-            # r'#EXT-X-MEDIA-SEQUENCE:(?!0$)',  # live streams [3]
-
-            # This heuristic also is not correct since segments may not be appended as well.
-            # Twitch vods of finished streams have EXT-X-PLAYLIST-TYPE:EVENT despite
-            # no segments will definitely be appended to the end of the playlist.
-            # r'#EXT-X-PLAYLIST-TYPE:EVENT',  # media segments may be appended to the end of
-            #                                 # event media playlists [4]
-            # r'#EXT-X-MAP:',  # media initialization [5]
-            # 1. https://tools.ietf.org/html/draft-pantos-http-live-streaming-17#section-4.3.2.4
-            # 2. https://tools.ietf.org/html/draft-pantos-http-live-streaming-17#section-4.3.2.2
-            # 3. https://tools.ietf.org/html/draft-pantos-http-live-streaming-17#section-4.3.3.2
-            # 4. https://tools.ietf.org/html/draft-pantos-http-live-streaming-17#section-4.3.3.5
-            # 5. https://tools.ietf.org/html/draft-pantos-http-live-streaming-17#section-4.3.2.5
-        ]
-        if not allow_unplayable_formats:
-            UNSUPPORTED_FEATURES += [
-                r'#EXT-X-KEY:METHOD=(?!NONE|AES-128)',  # encrypted streams [1]
-            ]
-
-        def check_results():
-            yield not info_dict.get('is_live')
-            for feature in UNSUPPORTED_FEATURES:
-                yield not re.search(feature, manifest)
-        return all(check_results())
 
     def real_download(self, filename, info_dict):
         man_url = info_dict['url']
@@ -59,35 +73,15 @@ class HlsFD(FragmentFD):
         man_url = urlh.geturl()
         s = urlh.read().decode('utf-8', 'ignore')
 
-        can_download, message = self.can_download(s, info_dict, self.params.get('allow_unplayable_formats')), None
-        if can_download:
-            has_ffmpeg = FFmpegFD.available()
-            no_crypto = not Cryptodome_AES and '#EXT-X-KEY:METHOD=AES-128' in s
-            if no_crypto and has_ffmpeg:
-                can_download, message = False, 'The stream has AES-128 encryption and pycryptodomex is not available'
-            elif no_crypto:
-                message = ('The stream has AES-128 encryption and neither ffmpeg nor pycryptodomex are available; '
-                           'Decryption will be performed natively, but will be extremely slow')
-            elif info_dict.get('extractor_key') == 'Generic' and re.search(r'(?m)#EXT-X-MEDIA-SEQUENCE:(?!0$)', s):
-                install_ffmpeg = '' if has_ffmpeg else 'install ffmpeg and '
-                message = ('Live HLS streams are not supported by the native downloader. If this is a livestream, '
-                           f'please {install_ffmpeg}add "--downloader ffmpeg --hls-use-mpegts" to your command')
-        if not can_download:
-            has_drm = re.search('|'.join([
-                r'#EXT-X-FAXS-CM:',  # Adobe Flash Access
-                r'#EXT-X-(?:SESSION-)?KEY:.*?URI="skd://',  # Apple FairPlay
-            ]), s)
-            if has_drm and not self.params.get('allow_unplayable_formats'):
-                self.report_error(
-                    'This video is DRM protected; Try selecting another format with --format or '
-                    'add --check-formats to automatically fallback to the next best format')
-                return False
-            message = message or 'Unsupported features have been detected'
-            fd = FFmpegFD(self.ydl, self.params)
-            self.report_warning(f'{message}; extraction will be delegated to {fd.get_basename()}')
-            return fd.real_download(filename, info_dict)
-        elif message:
-            self.report_warning(message)
+        can_be_downloaded_natively, should_try_ffmpeg = self._can_be_downloaded_natively_or_with_ffmpeg(s)
+        if not can_be_downloaded_natively:
+            if should_try_ffmpeg:
+                fd = FFmpegFD(self.ydl, self.params)
+                self.report_warning(
+                    f'Unsupported features have been detected; extraction will be delegated to {fd.get_basename()}')
+                return fd.real_download(filename, info_dict)
+
+            return False
 
         is_webvtt = info_dict['ext'] == 'vtt'
         if is_webvtt:
@@ -233,3 +227,74 @@ class HlsFD(FragmentFD):
                 ctx, fragments, info_dict, pack_func=pack_fragment, finish_func=fin_fragments)
         else:
             return self.download_and_append_fragments(ctx, fragments, info_dict)
+
+
+class HlsLiveFD(HlsBaseFD):
+    FD_NAME = 'hls-live-native'
+
+    def real_download(self, filename, info_dict):
+        self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
+        start_time = time.time()
+        ctx = {
+            'started': start_time,
+            'live': True,
+        }
+
+        requested_formats = info_dict.get('requested_formats')
+        timelines = []
+        if requested_formats:
+            for requested_format in requested_formats:
+                timelines.append(HlsTimeline[HlsFragment](
+                    requested_format['format_id'], requested_format['filepath'], requested_format['url']))
+        else:
+            timelines.append(HlsTimeline[HlsFragment](info_dict['format_id'], filename, info_dict['url']))
+
+        span = (0, math.inf) if self.params.get('live_from_start') else (start_time, math.inf)
+        playback = Playback[HlsFragment, HlsTimeline](timelines, span)
+
+        update_time = None
+        is_end_list = False
+        try:
+            while True:
+                processing_start = time.time()
+
+                for timeline in playback.timelines:
+                    urlh, manifest = self._download_manifest(info_dict, timeline.manifest_url)
+
+                    media_manifest = HlsMediaManifest(manifest, urlh.geturl())
+                    stats = media_manifest.get_stats()
+                    fragments = media_manifest.get_fragments()
+
+                    timeline.insert_many(fragments)
+                    update_time = stats['target_duration']
+                    if stats['is_end_list']:
+                        is_end_list = True
+
+                for (timeline, segments) in playback.seek():
+                    ctx['filename'] = timeline.filepath
+                    self._prepare_and_start_frag_download(ctx, info_dict)
+                    self.download_and_append_fragments(ctx, segments, info_dict)
+
+                if is_end_list:
+                    break
+
+                sleep_time = update_time - (time.time() - processing_start)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        except (KeyboardInterrupt, PlaybackFinish):
+            pass
+
+        playback_start = playback.get_start()
+        for timeline in timelines:
+            timeline_start = playback.get_timeline_start(timeline)
+
+            if requested_formats and not math.isclose(timeline_start, playback_start, abs_tol=0.1, rel_tol=0):
+                requested_format = next(
+                    fmt for fmt in requested_formats if timeline.timeline_id.startswith(fmt['format_id']))
+                requested_format['offset'] = timeline_start - playback_start
+
+            ctx['filename'] = timeline.filepath
+            self._prepare_frag_download(ctx)
+            self._finish_frag_download(ctx, info_dict)
+
+        return True, True
