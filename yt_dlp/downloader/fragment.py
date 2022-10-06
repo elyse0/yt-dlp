@@ -164,8 +164,10 @@ class FragmentFD(FileDownloader):
                 total_frags_str += ' (not including %d ad)' % ad_frags
         else:
             total_frags_str = 'unknown (live)'
-        self.to_screen(f'[{self.FD_NAME}] Total fragments: {total_frags_str}')
-        self.report_destination(ctx['filename'])
+        if not ctx['live']:
+            self.to_screen(f'[{self.FD_NAME}] Total fragments: {total_frags_str}')
+            self.report_destination(ctx['filename'])
+
         dl = HttpQuietDownloader(self.ydl, {
             **self.params,
             'noprogress': True,
@@ -217,7 +219,7 @@ class FragmentFD(FileDownloader):
 
     def _start_frag_download(self, ctx, info_dict):
         resume_len = ctx['complete_frags_downloaded_bytes']
-        total_frags = ctx['total_frags']
+        total_frags = ctx.get('total_frags')
         ctx_id = ctx.get('ctx_id')
         # This dict stores the download progress, it's updated by the progress
         # hook
