@@ -142,6 +142,11 @@ class MpdManifest:
         formats, subtitles = [], {}
         stream_numbers = collections.defaultdict(int)
         for period in mpd_doc.findall(_add_ns('Period')):
+            # Completely out of spec, but YT does this
+            segment_ingest_time = period.get('{http://youtube.com/yt/2012/10/10}segmentIngestTime')
+            if segment_ingest_time:
+                availability_start_time = unified_timestamp(segment_ingest_time)
+
             period_duration = parse_duration(period.get('duration')) or mpd_duration
             period_ms_info = extract_multisegment_info(period, {
                 'start_number': 1,
