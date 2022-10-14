@@ -1784,6 +1784,7 @@ from .tempo import TempoIE
 from .tencent import (
     IflixEpisodeIE,
     IflixSeriesIE,
+    VQQLiveIE,
     VQQSeriesIE,
     VQQVideoIE,
     WeTvEpisodeIE,

@@ -129,7 +129,7 @@ class VQQBaseIE(TencentBaseIE):
 
     _API_URL = 'https://h5vv6.video.qq.com/getvinfo'
     _APP_VERSION = '3.5.57'
-    _PLATFORM = '10901'
+    _PLATFORM = '10201'
     _HOST = 'v.qq.com'
     _REFERER = 'v.qq.com'
 
@@ -247,6 +247,69 @@ class VQQSeriesIE(VQQBaseIE):
             description=(traverse_obj(webpage_metadata, ('coverInfo', 'description'))
                          or self._og_search_description(webpage)))
 
+
+class VQQLiveIE(VQQBaseIE):
+    IE_NAME = 'vqq:live'
+    _VALID_URL = VQQBaseIE._VALID_URL_BASE + r'/live/p/newtopic/(?P<id>\w+)'
+
+    _TESTS = [{
+        'url': 'https://v.qq.com/live/p/newtopic/234462/index.html',
+        'info_dict': {
+            'id': '234462',
+            'title': 'S12小组赛第5日 T1 vs FNC',
+            'description': 'md5:8cae3534327315b3872fbef5e51b5c5b',
+        },
+    }]
+
+    def _real_extract(self, url):
+        display_id = self._match_id(url)
+        webpage = self._download_webpage(url, display_id)
+        webpage_metadata = self._search_json(
+            r'window\.__NUXT__=[^}]+baseInfo=', webpage, 'metadata', display_id, transform_source=js_to_json)
+
+        stream_id = webpage_metadata['stream_id']
+        guid = ''.join([random.choice(string.digits + string.ascii_lowercase) for _ in range(16)])
+        ckey = self._get_ckey(stream_id, url, guid)
+
+        formats, subtitles = [], {}
+        for resolution, quality in ((360, ''), (480, 'hd'), (720, 'shd'), (1080, 'fhd')):
+            api_response = self._download_json(
+                'https://infozb6.video.qq.com', stream_id, query={
+                    'cnlid': stream_id,
+                    'defn': quality,
+                    'cKey': ckey,
+                    'encryptVer': '8.1',
+                    'guid': guid,
+                    'tm': int(time.time()),
+                    'appVer': self._APP_VERSION,
+                    'platform': self._PLATFORM,
+                    'cmd': '2',
+                    'stream': '2',
+                    'sphttps': '1',
+                }, fatal=False)
+
+            if not api_response:
+                continue
+
+            fmts, subs = self._extract_m3u8_formats_and_subtitles(
+                api_response['playurl'], stream_id, 'mp4', fatal=False)
+
+            for fmt in fmts:
+                fmt.update({
+                    'height': resolution,
+                })
+
+            formats.extend(fmts)
+            self._merge_subtitles(subs, target=subtitles)
+
+        return {
+            'id': stream_id,
+            'title': webpage_metadata.get('title') or self._og_search_title(webpage),
+            'description': webpage_metadata.get('desc'),
+            'formats': formats,
+            'subtitles': subtitles,
+            'is_live': True,
+        }
 
 class WeTvBaseIE(TencentBaseIE):
     _VALID_URL_BASE = r'https?://(?:www\.)?wetv\.vip/(?:[^?#]+/)?play'
