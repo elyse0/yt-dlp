@@ -414,6 +414,7 @@ class TestUtil(unittest.TestCase):
         self.assertEqual(unified_timestamp('Sep 11, 2013 | 5:49 AM'), 1378878540)
         self.assertEqual(unified_timestamp('December 15, 2017 at 7:49 am'), 1513324140)
         self.assertEqual(unified_timestamp('2018-03-14T08:32:43.1493874+00:00'), 1521016363)
+        self.assertEqual(unified_timestamp('2022-10-13T02:37:47.831Z'), 1665628667)
 
         self.assertEqual(unified_timestamp('December 31 1969 20:00:01 EDT'), 1)
         self.assertEqual(unified_timestamp('Wednesday 31 December 1969 18:01:26 MDT'), 86)
