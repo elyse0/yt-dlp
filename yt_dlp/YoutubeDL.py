@@ -3936,6 +3936,8 @@ class YoutubeDL:
             try:
                 sub_copy = sub_info.copy()
                 sub_copy.setdefault('http_headers', info_dict.get('http_headers'))
+                sub_copy['format_id'] = sub_lang
+                sub_copy['is_live'] = info_dict.get('is_live')
                 self.dl(sub_filename, sub_copy, subtitle=True)
                 sub_info['filepath'] = sub_filename
                 ret.append((sub_filename, sub_filename_final))

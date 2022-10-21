@@ -14,6 +14,101 @@ from ..dependencies import Cryptodome_AES
 from ..utils import HlsMediaManifest, HlsFragment, InitializationFragmentError, bug_reports_message
 
 
+class HlsWebVtt:
+    def __init__(self):
+        self.extra_state = {}
+
+    def pack_fragment(self, frag_content, frag_index):
+        output = io.StringIO()
+        adjust = 0
+        overflow = False
+        mpegts_last = None
+        for block in webvtt.parse_fragment(frag_content):
+            if isinstance(block, webvtt.CueBlock):
+                self.extra_state['webvtt_mpegts_last'] = mpegts_last
+                if overflow:
+                    self.extra_state['webvtt_mpegts_adjust'] += 1
+                    overflow = False
+                block.start += adjust
+                block.end += adjust
+
+                dedup_window = self.extra_state.setdefault('webvtt_dedup_window', [])
+
+                ready = []
+
+                i = 0
+                is_new = True
+                while i < len(dedup_window):
+                    wcue = dedup_window[i]
+                    wblock = webvtt.CueBlock.from_json(wcue)
+                    i += 1
+                    if wblock.hinges(block):
+                        wcue['end'] = block.end
+                        is_new = False
+                        continue
+                    if wblock == block:
+                        is_new = False
+                        continue
+                    if wblock.end > block.start:
+                        continue
+                    ready.append(wblock)
+                    i -= 1
+                    del dedup_window[i]
+
+                if is_new:
+                    dedup_window.append(block.as_json)
+                for block in ready:
+                    block.write_into(output)
+
+                # we only emit cues once they fall out of the duplicate window
+                continue
+            elif isinstance(block, webvtt.Magic):
+                # take care of MPEG PES timestamp overflow
+                if block.mpegts is None:
+                    block.mpegts = 0
+                self.extra_state.setdefault('webvtt_mpegts_adjust', 0)
+                block.mpegts += self.extra_state['webvtt_mpegts_adjust'] << 33
+                if block.mpegts < self.extra_state.get('webvtt_mpegts_last', 0):
+                    overflow = True
+                    block.mpegts += 1 << 33
+                mpegts_last = block.mpegts
+
+                if frag_index == 1:
+                    self.extra_state['webvtt_mpegts'] = block.mpegts or 0
+                    self.extra_state['webvtt_local'] = block.local or 0
+                    # XXX: block.local = block.mpegts = None ?
+                else:
+                    if block.mpegts is not None and block.local is not None:
+                        adjust = (
+                            (block.mpegts - self.extra_state.get('webvtt_mpegts', 0))
+                            - (block.local - self.extra_state.get('webvtt_local', 0))
+                        )
+                    continue
+            elif isinstance(block, webvtt.HeaderBlock):
+                if frag_index != 1:
+                    # XXX: this should probably be silent as well
+                    # or verify that all segments contain the same data
+                    self.report_warning(bug_reports_message(
+                        'Discarding a %s block found in the middle of the stream; '
+                        'if the subtitles display incorrectly,'
+                        % (type(block).__name__)))
+                    continue
+            block.write_into(output)
+
+        return output.getvalue().encode()
+
+    def fin_fragments(self):
+        dedup_window = self.extra_state.get('webvtt_dedup_window')
+        if not dedup_window:
+            return b''
+
+        output = io.StringIO()
+        for cue in dedup_window:
+            webvtt.CueBlock.from_json(cue).write_into(output)
+
+        return output.getvalue().encode()
+
+
 class HlsBaseFD(FragmentFD):
 
     def _can_be_downloaded_natively_or_with_ffmpeg(self, manifest):
@@ -107,7 +202,7 @@ class HlsFD(HlsBaseFD):
         else:
             self._prepare_and_start_frag_download(ctx, info_dict)
 
-        extra_state = ctx.setdefault('extra_state', {})
+        hls_webvtt = HlsWebVtt()
 
         extra_query = None
         extra_param_to_segment_url = info_dict.get('extra_param_to_segment_url')
@@ -133,98 +228,8 @@ class HlsFD(HlsBaseFD):
             return fd.real_download(filename, info_dict)
 
         if is_webvtt:
-            def pack_fragment(frag_content, frag_index):
-                output = io.StringIO()
-                adjust = 0
-                overflow = False
-                mpegts_last = None
-                for block in webvtt.parse_fragment(frag_content):
-                    if isinstance(block, webvtt.CueBlock):
-                        extra_state['webvtt_mpegts_last'] = mpegts_last
-                        if overflow:
-                            extra_state['webvtt_mpegts_adjust'] += 1
-                            overflow = False
-                        block.start += adjust
-                        block.end += adjust
-
-                        dedup_window = extra_state.setdefault('webvtt_dedup_window', [])
-
-                        ready = []
-
-                        i = 0
-                        is_new = True
-                        while i < len(dedup_window):
-                            wcue = dedup_window[i]
-                            wblock = webvtt.CueBlock.from_json(wcue)
-                            i += 1
-                            if wblock.hinges(block):
-                                wcue['end'] = block.end
-                                is_new = False
-                                continue
-                            if wblock == block:
-                                is_new = False
-                                continue
-                            if wblock.end > block.start:
-                                continue
-                            ready.append(wblock)
-                            i -= 1
-                            del dedup_window[i]
-
-                        if is_new:
-                            dedup_window.append(block.as_json)
-                        for block in ready:
-                            block.write_into(output)
-
-                        # we only emit cues once they fall out of the duplicate window
-                        continue
-                    elif isinstance(block, webvtt.Magic):
-                        # take care of MPEG PES timestamp overflow
-                        if block.mpegts is None:
-                            block.mpegts = 0
-                        extra_state.setdefault('webvtt_mpegts_adjust', 0)
-                        block.mpegts += extra_state['webvtt_mpegts_adjust'] << 33
-                        if block.mpegts < extra_state.get('webvtt_mpegts_last', 0):
-                            overflow = True
-                            block.mpegts += 1 << 33
-                        mpegts_last = block.mpegts
-
-                        if frag_index == 1:
-                            extra_state['webvtt_mpegts'] = block.mpegts or 0
-                            extra_state['webvtt_local'] = block.local or 0
-                            # XXX: block.local = block.mpegts = None ?
-                        else:
-                            if block.mpegts is not None and block.local is not None:
-                                adjust = (
-                                    (block.mpegts - extra_state.get('webvtt_mpegts', 0))
-                                    - (block.local - extra_state.get('webvtt_local', 0))
-                                )
-                            continue
-                    elif isinstance(block, webvtt.HeaderBlock):
-                        if frag_index != 1:
-                            # XXX: this should probably be silent as well
-                            # or verify that all segments contain the same data
-                            self.report_warning(bug_reports_message(
-                                'Discarding a %s block found in the middle of the stream; '
-                                'if the subtitles display incorrectly,'
-                                % (type(block).__name__)))
-                            continue
-                    block.write_into(output)
-
-                return output.getvalue().encode()
-
-            def fin_fragments():
-                dedup_window = extra_state.get('webvtt_dedup_window')
-                if not dedup_window:
-                    return b''
-
-                output = io.StringIO()
-                for cue in dedup_window:
-                    webvtt.CueBlock.from_json(cue).write_into(output)
-
-                return output.getvalue().encode()
-
             self.download_and_append_fragments(
-                ctx, fragments, info_dict, pack_func=pack_fragment, finish_func=fin_fragments)
+                ctx, fragments, info_dict, pack_func=hls_webvtt.pack_fragment, finish_func=hls_webvtt.fin_fragments)
         else:
             return self.download_and_append_fragments(ctx, fragments, info_dict)
 
@@ -251,6 +256,7 @@ class HlsLiveFD(HlsBaseFD):
 
         span = (0, math.inf) if self.params.get('live_from_start') else (start_time, math.inf)
         playback = Playback[HlsFragment, HlsTimeline](timelines, span)
+        hls_webvtt = HlsWebVtt()
 
         update_time = None
         is_end_list = False
@@ -273,7 +279,13 @@ class HlsLiveFD(HlsBaseFD):
                 for (timeline, segments) in playback.seek():
                     ctx['filename'] = timeline.filepath
                     self._prepare_and_start_frag_download(ctx, info_dict)
-                    self.download_and_append_fragments(ctx, segments, info_dict)
+
+                    if 'vtt' in timeline.filepath:
+                        self.download_and_append_fragments(
+                            ctx, segments, info_dict, pack_func=hls_webvtt.pack_fragment,
+                            finish_func=hls_webvtt.fin_fragments)
+                    else:
+                        self.download_and_append_fragments(ctx, segments, info_dict)
 
                 if is_end_list:
                     break
