@@ -5988,6 +5988,8 @@ class HlsFragment(TypedDict):
 class HlsMediaManifest:
 
     def __init__(self, manifest, manifest_url):
+        manifest = re.sub(r'#EXT-X-DISCONTINUITY[\s\S]*#EXT-X-DISCONTINUITY', '', manifest)
+
         self.manifest = manifest
         self.manifest_url = manifest_url
 
@@ -6042,10 +6044,6 @@ class HlsMediaManifest:
         }
 
     def get_fragments(self, format_index=None, fragment_index=None, extra_query=None) -> List[HlsFragment]:
-        if 'twitch-stitched-ad' in self.manifest:
-            print('Skipping Twitch ads')
-            return []
-
         is_live = '#EXT-X-PLAYLIST-TYPE:VOD' not in self.manifest
 
         fragments = []
@@ -6054,6 +6052,7 @@ class HlsMediaManifest:
         decrypt_info: DecryptInfo = {'METHOD': 'NONE'}
         byte_range: Union[Dict, ByteRange] = {}
         discontinuity_count = 0
+        is_discontinuity = False
         frag_index = 0
         program_date_time: float = time.time() if is_live else 0
         automatic_time = True
@@ -6063,6 +6062,8 @@ class HlsMediaManifest:
             line = line.strip()
             if line:
                 if not line.startswith('#'):
+                    if is_discontinuity:
+                        continue
                     if format_index and discontinuity_count != format_index:
                         continue
                     if ad_frag_next:
@@ -6095,6 +6096,8 @@ class HlsMediaManifest:
                     media_sequence += 1
 
                 elif line.startswith('#EXT-X-MAP'):
+                    if is_discontinuity:
+                        continue
                     if format_index and discontinuity_count != format_index:
                         continue
                     if frag_index > 0:
@@ -6162,6 +6165,7 @@ class HlsMediaManifest:
                     ad_frag_next = False
                 elif line.startswith('#EXT-X-DISCONTINUITY'):
                     discontinuity_count += 1
+                    is_discontinuity = not is_discontinuity
                 elif line.startswith('#EXT-X-PROGRAM-DATE-TIME'):
                     program_date_time = unified_timestamp(line[25:])
                     automatic_time = False
