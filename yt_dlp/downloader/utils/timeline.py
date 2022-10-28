@@ -32,9 +32,13 @@ class Timeline(Generic[GenericFragment]):
 
 class HlsTimeline(Timeline[GenericFragment]):
 
-    def __init__(self, timeline_id: str, filepath: str, manifest_url: str):
+    def __init__(self, timeline_id: str, filepath: str, manifest_url: str, fragments_and_stats_func):
         super().__init__(timeline_id, filepath)
         self.manifest_url = manifest_url
+        self.fragments_and_stats_func = fragments_and_stats_func
+
+    def get_manifest_fragments_and_stats(self):
+        return self.fragments_and_stats_func(self.manifest_url)
 
     def all_segments_have_real_time(self) -> bool:
         return all(segment.get('automatic_time') is False for segment in self.segments)

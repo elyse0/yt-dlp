@@ -1,3 +1,4 @@
+import functools
 import io
 import math
 import re
@@ -237,6 +238,15 @@ class HlsFD(HlsBaseFD):
 class HlsLiveFD(HlsBaseFD):
     FD_NAME = 'hls-live-native'
 
+    def _get_fragments_and_stats(self, info_dict, manifest_url):
+        urlh, manifest = self._download_manifest(info_dict, manifest_url)
+
+        media_manifest = HlsMediaManifest(manifest, urlh.geturl())
+        stats = media_manifest.get_stats()
+        fragments = media_manifest.get_fragments()
+
+        return fragments, stats
+
     def real_download(self, filename, info_dict):
         self.to_screen('[%s] Downloading m3u8 manifest' % self.FD_NAME)
         start_time = time.time()
@@ -249,12 +259,25 @@ class HlsLiveFD(HlsBaseFD):
         timelines = []
         if requested_formats:
             for requested_format in requested_formats:
-                timelines.append(HlsTimeline[HlsFragment](
-                    requested_format['format_id'], requested_format['filepath'], requested_format['url']))
-        else:
-            timelines.append(HlsTimeline[HlsFragment](info_dict['format_id'], filename, info_dict['url']))
+                frag_and_stats_func = requested_format['fragments_and_stats'] if requested_format.get(
+                    'fragments_and_stats') is callable else functools.partial(self._get_fragments_and_stats, info_dict)
 
-        span = (0, math.inf) if self.params.get('live_from_start') else (start_time, math.inf)
+                timelines.append(HlsTimeline[HlsFragment](
+                    requested_format['format_id'], requested_format['filepath'],
+                    requested_format['url'], frag_and_stats_func))
+        else:
+            frag_and_stats_func = info_dict['fragments_and_stats'] if info_dict.get(
+                'fragments_and_stats') is callable else functools.partial(self._get_fragments_and_stats, info_dict)
+
+            timelines.append(HlsTimeline[HlsFragment](
+                info_dict['format_id'], filename, info_dict['url'], frag_and_stats_func))
+
+        span = (start_time, math.inf)
+        if self.params.get('live_from_start'):
+            span = (0, math.inf)
+        if info_dict.get('live_start') and info_dict.get('live_end'):
+            span = info_dict['live_start'], info_dict['live_end']
+
         playback = Playback[HlsFragment, HlsTimeline](timelines, span)
         hls_webvtt = HlsWebVtt()
 
@@ -265,11 +288,7 @@ class HlsLiveFD(HlsBaseFD):
                 processing_start = time.time()
 
                 for timeline in playback.timelines:
-                    urlh, manifest = self._download_manifest(info_dict, timeline.manifest_url)
-
-                    media_manifest = HlsMediaManifest(manifest, urlh.geturl())
-                    stats = media_manifest.get_stats()
-                    fragments = media_manifest.get_fragments()
+                    fragments, stats = timeline.get_manifest_fragments_and_stats()
 
                     timeline.insert_many(fragments)
                     update_time = stats['target_duration']
