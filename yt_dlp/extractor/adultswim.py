@@ -1,7 +1,13 @@
 import json
+import re
+import time
 
 from .turner import TurnerBaseIE
+from .. import InfoExtractor
+from ..compat import functools
 from ..utils import (
+    ExtractorError,
+    HlsMediaManifest,
     determine_ext,
     float_or_none,
     int_or_none,
@@ -196,3 +202,95 @@ class AdultSwimIE(TurnerBaseIE):
             return self.playlist_result(
                 entries, show_path, show_data.get('title'),
                 strip_or_none(show_data.get('metaDescription')))
+
+
+class AdultSwimStreamIE(InfoExtractor):
+    IE_NAME = 'adultswim:stream'
+    _VALID_URL = r'https?://(?:www\.)?adultswim\.com/streams/(?P<id>[^/?#]+)'
+
+    _TESTS = [{
+        'url': 'https://www.adultswim.com/streams/rick-and-morty',
+        'info_dict': {
+            'id': r're:^rick-and-morty-[1-4]-\d{1,2}$',
+            'ext': 'mp4',
+            'title': r're:^Rick and Morty S[1-4] EP\d{1,2} .+$',
+            'description': 'An infinite loop of Rick and Morty. You\'re welcome. (Marathon available in select regions)',
+            'series': 'Rick and Morty',
+            # Live episode changes periodically
+            'season': str,
+            'episode': str,
+            'season_number': int,
+            'episode_number': int,
+            'duration': float,
+        },
+    }]
+
+    def _get_fragments_and_stats(self, stream_id, manifest_url):
+        manifest = self._download_webpage(manifest_url, stream_id)
+
+        media_manifest = HlsMediaManifest(manifest, manifest_url)
+        fragments = media_manifest.get_fragments()
+        if not fragments:
+            raise ExtractorError('Could not find fragments')
+
+        fragment_index_pattern = re.compile(r'/seg-\d+_(?P<fragment_index>\d+)\.ts')
+
+        first_fragment = next(fragment for fragment in fragments if '/live/ad-slate' not in fragment['url'])
+        first_fragment_index_str = self._search_regex(fragment_index_pattern, first_fragment['url'], 'fragment_index')
+
+        first_fragment_index = int(first_fragment_index_str)
+        if first_fragment_index == 0:
+            return fragments
+
+        missing_fragments = []
+        for fragment_index in range(first_fragment_index):
+            fragment_start = first_fragment['start'] - (first_fragment['duration'] * (first_fragment_index - fragment_index))
+            missing_fragments.append({
+                **first_fragment,
+                'frag_index': first_fragment['frag_index'] - (first_fragment_index - fragment_index),
+                'media_sequence': first_fragment['media_sequence'] - (first_fragment_index - fragment_index),
+                'url': first_fragment['url'].replace(
+                    first_fragment_index_str, f'{fragment_index:0{len(first_fragment_index_str)}}'),
+                'start': fragment_start,
+                'end': fragment_start + first_fragment['duration'],
+            })
+
+        all_fragments = missing_fragments + fragments
+
+        return all_fragments, media_manifest.get_stats()
+
+    def _real_extract(self, url):
+        stream_id = self._match_id(url)
+        webpage = self._download_webpage(url, stream_id)
+
+        nextjs_data = self._search_nextjs_data(webpage, stream_id)['props']['__REDUX_STATE__']
+        stream_info = next(stream for stream in nextjs_data['streams'] if stream['id'] == stream_id)
+
+        start_time = time.time()
+        episodes = []
+        for episode in nextjs_data['marathon'][stream_info['vod_to_live_id']]:
+            if episode['startTime'] / 1000 + episode['duration'] < start_time:
+                continue
+            episodes.append(episode)
+
+        if not episodes:
+            raise ExtractorError('No episodes found')
+
+        formats, subtitles = self._extract_m3u8_formats_and_subtitles(
+            f'https://adultswim-vodlive.cdn.turner.com/live/{stream_id}/stream_de.m3u8?hdnts=', stream_id)
+
+        for fmt in formats:
+            fmt['protocol'] = 'm3u8_native_generator'
+            fmt['fragments_and_stats'] = functools.partial(self._get_fragments_and_stats, stream_id)
+
+        self._sort_formats(formats)
+        return {
+            'id': stream_id,
+            'title': stream_info.get('title'),
+            'description': stream_info.get('description'),
+            'formats': formats,
+            'subtitles': subtitles,
+            'is_live': True,
+            'live_start': time.time(),
+            'live_end': time.time() + 5 * 60
+        }

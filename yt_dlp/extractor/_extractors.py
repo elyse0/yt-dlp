@@ -56,7 +56,10 @@ from .adobetv import (
     AdobeTVChannelIE,
     AdobeTVVideoIE,
 )
-from .adultswim import AdultSwimIE
+from .adultswim import (
+    AdultSwimIE,
+    AdultSwimStreamIE,
+)
 from .aenetworks import (
     AENetworksIE,
     AENetworksCollectionIE,
