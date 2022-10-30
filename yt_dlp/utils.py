@@ -6164,7 +6164,8 @@ class HlsMediaManifest:
                     ad_frag_next = True
                 elif self._is_ad_fragment_end(line):
                     ad_frag_next = False
-                elif line.startswith('#EXT-X-DISCONTINUITY'):
+                # We shouldn't skip fragments with #EXT-X-DISCONTINUITY-SEQUENCE:0
+                elif line == '#EXT-X-DISCONTINUITY':
                     discontinuity_count += 1
                     is_discontinuity = not is_discontinuity
                 elif line.startswith('#EXT-X-PROGRAM-DATE-TIME'):

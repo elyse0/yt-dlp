@@ -66,14 +66,26 @@ class Playback(Generic[GenericFragment, GenericTimeline]):
 
             return timeline_segments[:cut_end]
 
-        timelines_segments = [cut_section(timeline_segments) for timeline_segments in timelines_segments]
+        new_timelines_segments = []
+        for timeline_segments in timelines_segments:
+            print()
+            print('')
+            print(f'Cutting {len(timeline_segments)} segments')
+            cut_segments = cut_section(timeline_segments)
+            print(f'{len(cut_segments)} segments left')
+            new_timelines_segments.append(cut_segments)
+        #if any(not timeline_segments for timeline_segments in timelines_segments):
+        #    return self._cursor
 
-        return min(max(segment['end'] for segment in timeline_segments) for timeline_segments in timelines_segments)
+        return min(max(segment['end'] for segment in timeline_segments) for timeline_segments in new_timelines_segments)
 
     def seek(self) -> List[Tuple[GenericTimeline, List[GenericFragment]]]:
-        next_cursor = self._get_next_cursor()
+        print(f'Span: ({self._span_start, self._span_end})')
+        print(f'Current cursor: {self._cursor}')
 
-        if next_cursor >= self._span_end:
+        next_cursor = self._get_next_cursor()
+        print(f'Next cursor: {next_cursor}')
+        if self._cursor >= self._span_end:
             raise PlaybackFinish
 
         timeline_segments = []

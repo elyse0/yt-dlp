@@ -9,6 +9,8 @@ def get_suitable_downloader(info_dict, params={}, default=NO_DEFAULT, protocol=N
     protocols = (protocol or info_copy['protocol']).split('+')
     downloaders = [_get_suitable_downloader(info_copy, proto, params, default) for proto in protocols]
 
+    return DashLiveFD
+
     if set(downloaders) == {FFmpegFD} and FFmpegFD.can_merge_formats(info_copy, params):
         return FFmpegFD
     elif (set(downloaders) == {DashSegmentsFD}

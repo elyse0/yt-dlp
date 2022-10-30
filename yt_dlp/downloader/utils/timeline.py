@@ -69,13 +69,14 @@ class HlsTimeline(Timeline[GenericFragment]):
 
 class DashTimeline(Timeline[GenericFragment]):
 
-    def __init__(self, timeline_id: str, filepath: str, base_url: str):
+    def __init__(self, timeline_id: str, filepath: str, base_url: str, frag_func=None):
         super().__init__(timeline_id, filepath)
         self.base_url = base_url
+        self.frag_func = frag_func
 
     def insert_one(self, new_segment: GenericFragment) -> None:
         if new_segment.get('start') is None or new_segment.get('end') is None:
-            return
+            raise Exception
 
         if not len(self.segments):
             self.segments.append(new_segment)

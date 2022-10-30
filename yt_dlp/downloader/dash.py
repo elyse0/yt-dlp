@@ -1,4 +1,5 @@
 import collections
+import functools
 import math
 import re
 import time
@@ -520,9 +521,17 @@ class DashLiveFD(FragmentFD):
                 timelines.append(DashTimeline[DashFragment](
                     requested_format['format_id'], requested_format['filepath'], requested_format['fragment_base_url']))
         else:
-            timelines.append(DashTimeline[DashFragment](info_dict['format_id'], filename, info_dict['fragment_base_url']))
+            frag_func = functools.partial(info_dict['fragments'], ctx) if callable(info_dict.get('fragments')) else None
+            timelines.append(DashTimeline[DashFragment](
+                info_dict['format_id'], filename, info_dict['fragment_base_url'], frag_func))
 
-        span = (0, math.inf) if self.params.get('live_from_start') else (start_time, math.inf)
+        span = (start_time, math.inf)
+        if self.params.get('live_from_start'):
+            span = (0, math.inf)
+        if info_dict.get('section_start') is not None and info_dict.get('section_end'):
+            span = info_dict['section_start'], info_dict['section_end']
+
+        self.write_debug(f'Playback span: {span}')
         playback = Playback[DashFragment, DashTimeline](timelines, span)
 
         is_initial = True
@@ -546,8 +555,9 @@ class DashLiveFD(FragmentFD):
                     for timeline in playback.timelines:
                         fmt = next(fmt for fmt in new_formats if timeline.timeline_id.startswith(fmt['format_id']))
 
-                        init_stream = fmt['fragments'][0]
-                        init_stream['url'] = urljoin(fmt['fragment_base_url'], init_stream['path'])
+                        init_stream = (timeline.frag_func() if timeline.frag_func else fmt['fragments'])[0]
+                        init_stream['url'] = init_stream.get('url') or urljoin(
+                            fmt['fragment_base_url'], init_stream['path'])
                         init_stream['frag_index'] = 0
 
                         ctx['filename'] = timeline.filepath
@@ -556,7 +566,7 @@ class DashLiveFD(FragmentFD):
 
                 for timeline in playback.timelines:
                     fmt = next(fmt for fmt in new_formats if timeline.timeline_id.startswith(fmt['format_id']))
-                    fragments: List[DashFragment] = fmt['fragments'][1:]
+                    fragments: List[DashFragment] = (timeline.frag_func() if timeline.frag_func else fmt['fragments'])[1:]
                     timeline.insert_many(fragments)
 
                 for (timeline, fragments) in playback.seek():
@@ -565,7 +575,7 @@ class DashLiveFD(FragmentFD):
                         new_fragments.append({
                             **dict(fragment),
                             'frag_index': index,
-                            'url': urljoin(timeline.base_url, fragment['path']),
+                            'url': fragment.get('url') or urljoin(timeline.base_url, fragment['path']),
                         })
 
                     ctx['filename'] = timeline.filepath
