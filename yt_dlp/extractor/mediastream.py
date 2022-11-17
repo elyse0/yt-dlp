@@ -19,6 +19,49 @@ class MediaStreamIE(InfoExtractor):
         },
     }]
 
+    _WEBPAGE_TESTS = [{
+        'url': 'https://www.multimedios.com/video/costa-rica-tv-en-vivo/v2616',
+        'info_dict': {
+            'id': '5a7b1e63a8da282c34d65445',
+            'title': 're:mmtv-costarica',
+            'description': 'mmtv-costarica',
+            'thumbnail': 're:^https?://[^?#]+5a7b1e63a8da282c34d65445',
+            'ext': 'mp4',
+            'live_status': "is_live",
+        },
+        'params': {
+            'skip_download': 'Livestream'
+        }
+    }, {
+        'url': 'https://www.multimedios.com/television/clases-de-llaves-y-castigos-quien-sabe-mas',
+        'md5': 'de31f0b1ecc321fb35bf22d58734ea40',
+        'info_dict': {
+            'id': '63731bab8ec9b308a2c9ed28',
+            'title': 'Clases de llaves y castigos ¿Quién sabe más?',
+            'description': 'md5:1b49aa1ee5a4b32fbd66104b2d629e9d',
+            'thumbnail': 're:^https?://[^?#]+63731bab8ec9b308a2c9ed28',
+            'ext': 'mp4',
+        },
+    }, {
+        'url': 'https://www.americatv.com.pe/videos/esto-es-guerra/facundo-gonzalez-sufrio-fuerte-golpe-durante-competencia-frente-hugo-garcia-eeg-noticia-139120',
+        'info_dict': {
+            'id': '63756df1c638b008a5659dec',
+            'title': 'Facundo González sufrió fuerte golpe durante competencia frente a Hugo García en EEG',
+            'description': 'md5:9490c034264afd756eef7b2c3adee69e',
+            'thumbnail': 're:^https?://[^?#]+63756df1c638b008a5659dec',
+            'ext': 'mp4',
+        },
+    }, {
+        'url': 'https://www.americatv.com.pe/videos/al-fondo-hay-sitio/nuevas-lomas-town-bernardo-mata-se-enfrento-sujeto-luchar-amor-macarena-noticia-139083',
+        'info_dict': {
+            'id': '637307669609130f74cd3a6e',
+            'title': 'Las Nuevas Lomas Town: Bernardo De La Mata se enfrentó a sujeto para luchar por el amor de Macarena',
+            'description': 'md5:60d71772f1e1496923539ae58aa17124',
+            'thumbnail': 're:^https?://[^?#]+637307669609130f74cd3a6e',
+            'ext': 'mp4',
+        },
+    }]
+
     @classmethod
     def _extract_embed_urls(cls, url, webpage):
         for mobj in re.finditer(r'<script[^>]+>[^>]*playerMdStream.mdstreamVideo\(\s*[\'"](?P<video_id>\w+)', webpage):
