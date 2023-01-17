@@ -1143,6 +1143,11 @@ from .nbc import (
     NBCSportsVPlayerIE,
     NBCStationsIE,
 )
+from .nhaccuatui import (
+    NhaccuatuiPlaylistIE,
+    NhaccuatuiTrackIE,
+    NhaccuatuiVideoIE,
+)
 from .ndr import (
     NDRIE,
     NJoyIE,
