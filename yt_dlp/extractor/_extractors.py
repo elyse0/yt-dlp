@@ -1306,6 +1306,7 @@ from .oftv import (
 )
 from .oktoberfesttv import OktoberfestTVIE
 from .olympics import OlympicsReplayIE
+from .omletgg import OmletGGIE
 from .on24 import On24IE
 from .ondemandkorea import OnDemandKoreaIE
 from .onefootball import OneFootballIE
